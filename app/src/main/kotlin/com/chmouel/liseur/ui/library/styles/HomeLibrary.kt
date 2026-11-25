@@ -93,6 +93,7 @@ import com.chmouel.liseur.data.quotes.HomeQuote
 import com.chmouel.liseur.domain.HomeSeriesSet
 import com.chmouel.liseur.domain.HomeShelfKind
 import com.chmouel.liseur.domain.HomeShelfTile
+import com.chmouel.liseur.domain.ReadingPulse
 import com.chmouel.liseur.domain.SeriesShelf
 import com.chmouel.liseur.domain.displayAuthor
 import com.chmouel.liseur.domain.displayTitle
@@ -129,12 +130,14 @@ import kotlinx.coroutines.launch
 internal fun HomeLibrary(
     state: LibraryUiState,
     hero: HeroDetail?,
+    pulse: ReadingPulse?,
     listState: LazyListState,
     onBookSelected: (Book) -> Unit,
     onBookLongPress: (Book) -> Unit,
     onSeriesSelected: (SeriesShelf) -> Unit,
     onOpenShelf: (HomeShelfKind) -> Unit,
     onBrowseAll: () -> Unit,
+    onOpenStats: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenRecent: () -> Unit = onBrowseAll,
     onChooseStyle: () -> Unit = {},
@@ -191,15 +194,18 @@ internal fun HomeLibrary(
                 }
             }
             val hasHero = current != null || starter != null
-            if (wide && hasHero) {
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = gutter) {
-                    heroCard(Modifier.weight(0.55f))
-                    ShelfTiles(desk.tiles, onOpenShelf, onBrowseAll, onChooseStyle, Modifier.weight(0.45f))
-                }
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(24.dp), modifier = gutter) {
-                    if (hasHero) heroCard(Modifier.fillMaxWidth())
-                    ShelfTiles(desk.tiles, onOpenShelf, onBrowseAll, onChooseStyle, Modifier.fillMaxWidth())
+            Column(modifier = gutter, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                pulse?.let { PulseLine(it, onOpenStats) }
+                if (wide && hasHero) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        heroCard(Modifier.weight(0.55f))
+                        ShelfTiles(desk.tiles, onOpenShelf, onBrowseAll, onChooseStyle, Modifier.weight(0.45f))
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                        if (hasHero) heroCard(Modifier.fillMaxWidth())
+                        ShelfTiles(desk.tiles, onOpenShelf, onBrowseAll, onChooseStyle, Modifier.fillMaxWidth())
+                    }
                 }
             }
         }
@@ -309,6 +315,25 @@ internal fun HomeLibrary(
             }
         }
     }
+}
+
+/** Today's minutes and streak, with a shortcut to reading stats. */
+@Composable
+private fun PulseLine(pulse: ReadingPulse, onOpenStats: () -> Unit) {
+    val parts = listOfNotNull(
+        pulse.minutesToday.takeIf { it > 0 }?.let { stringResource(R.string.home_pulse_today, it) },
+        pulse.streakDays.takeIf { it > 0 }?.let { pluralStringResource(R.plurals.home_pulse_streak, it, it) },
+    )
+    Text(
+        text = parts.joinToString(" · "),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier
+            .clickable(onClickLabel = stringResource(R.string.reading_stats), onClick = onOpenStats)
+            .padding(vertical = 4.dp),
+    )
 }
 
 @Composable

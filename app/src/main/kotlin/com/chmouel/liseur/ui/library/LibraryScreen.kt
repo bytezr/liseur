@@ -4,7 +4,6 @@ import androidx.activity.compose.BackHandler
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -139,13 +138,11 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.res.stringResource
@@ -170,6 +167,7 @@ import com.chmouel.liseur.data.remote.CatalogStatus
 import com.chmouel.liseur.data.remote.SyncFailure
 import com.chmouel.liseur.data.remote.SyncOutcome
 import com.chmouel.liseur.ui.BusyBar
+import com.chmouel.liseur.ui.navigation.MainTabTopAppBar
 import com.chmouel.liseur.ui.navigation.MainTabsState
 import com.chmouel.liseur.ui.navigation.mainTabBarSpace
 import com.chmouel.liseur.ui.navigation.rememberMainTabsState
@@ -184,9 +182,7 @@ import com.chmouel.liseur.data.db.DownloadState
 import com.chmouel.liseur.ui.LocalEInk
 import com.chmouel.liseur.ui.LiseurModalBottomSheet
 import com.chmouel.liseur.ui.UploadBookOfferDialog
-import com.chmouel.liseur.ui.BRAND_TILE_ASPECT
 import com.chmouel.liseur.ui.BusyIndicator
-import com.chmouel.liseur.ui.brandTileHeight
 import com.chmouel.liseur.ui.library.styles.LibraryStyleSheet
 import com.chmouel.liseur.ui.library.styles.ListLibrary
 import com.chmouel.liseur.ui.library.styles.RevealInsertedRow
@@ -195,7 +191,6 @@ import com.chmouel.liseur.ui.library.styles.HomeLibrary
 import com.chmouel.liseur.ui.library.styles.isUnderway
 import com.chmouel.liseur.ui.contentWidthCap
 import com.chmouel.liseur.ui.coverMinSize
-import com.chmouel.liseur.ui.libraryBarHeight
 import com.chmouel.liseur.ui.windowWidth
 import com.chmouel.liseur.ui.withoutBottom
 import kotlinx.coroutines.launch
@@ -298,17 +293,6 @@ fun LibraryScreen(
     modifier: Modifier = Modifier,
 ) {
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
-    // Which cut of the reading mark to draw.  Asked of the scheme in
-    // force rather than of the resource qualifiers, so it follows the
-    // app's own dark setting even when the system disagrees.
-    val darkMark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-    // The bar shows the illustration at the size the window can afford.
-    val barWidth = windowWidth()
-    val tileHeight = brandTileHeight(barWidth)
-    // Keyed to the picture, not to the window class: a seven-inch
-    // e-reader lands just under Material's tablet threshold, and the
-    // bar should follow the size of the tile it is holding.
-    val wide = tileHeight >= 64.dp
     val classicState = rememberLazyGridState()
     val homeState = rememberLazyListState()
     val shelvesState = rememberLazyListState()
@@ -563,9 +547,8 @@ fun LibraryScreen(
     // above by its own enabled flag: with search open over the archive,
     // the first Back closes search and the second comes back here.
     val archived = state.filters.archived
-    BackHandler(enabled = archived && !state.isSearchActive) {
-        onToggleFilter(LibraryFilterOption.ARCHIVED)
-    }
+    val leaveArchive: () -> Unit = { onToggleFilter(LibraryFilterOption.ARCHIVED) }
+    BackHandler(enabled = archived && !state.isSearchActive, onBack = leaveArchive)
 
     val layout = state.layout
     // Nothing to read or switch between yet: the empty-library onboarding
@@ -684,103 +667,17 @@ fun LibraryScreen(
                     },
                 )
             } else {
-                // Deliberately the compact bar, not the large one: the
-                // collapsed form is the good one, so it is what the shelf
-                // gets all the time rather than only once you scroll.
-                TopAppBar(
-                    title = {
-                        // The archive is a place of its own, so the bar
-                        // says where you are instead of whose shelf it
-                        // is: the brand tile and the book count both
-                        // belong to the library you have stepped out of.
-                        if (archived) {
-                            Text(
-                                text = stringResource(R.string.filter_archived),
-                                style = MaterialTheme.typography.titleLarge,
-                            )
-                        } else {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { scrollCurrentToTop() },
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                // A woman reading stretched out on her couch,
-                                // cut from the banner art — the reading mark,
-                                // in place of a plain wordmark or the launcher
-                                // icon.  Painted art with its own wall and
-                                // floor, so it is framed as a small tile
-                                // rather than knocked out to line work.
-                                //
-                                // Which cut to draw is asked of the theme in
-                                // force here, not of a -night qualifier: those
-                                // follow the system, and the app's own
-                                // light/dark setting is allowed to disagree.
-                                Image(
-                                    painter = painterResource(
-                                        if (darkMark) R.drawable.ic_reading_scene_night
-                                        else R.drawable.ic_reading_scene,
-                                    ),
-                                    contentDescription = null,
-                                    // Fit, not Crop, and the frame pinned to
-                                    // the picture's own aspect: whatever
-                                    // height the bar ends up granting, the
-                                    // box can never come out wider than the
-                                    // art and take a slice off her head.
-                                    contentScale = ContentScale.Fit,
-                                    modifier = Modifier
-                                        .height(tileHeight)
-                                        .aspectRatio(BRAND_TILE_ASPECT)
-                                        .clip(RoundedCornerShape(if (wide) 14.dp else 10.dp)),
-                                )
-                                Spacer(Modifier.width(if (wide) 16.dp else 10.dp))
-                                Column(Modifier.weight(1f)) {
-                                    // With the tabs, the bar names the tab, so
-                                    // Home and Library never look like one screen.
-                                    Text(
-                                        text = when {
-                                            !layout.tabs || onboarding -> stringResource(R.string.library_title)
-                                            showHome -> stringResource(R.string.library_style_home)
-                                            showSeries -> stringResource(R.string.home_tile_series)
-                                            else -> stringResource(R.string.library_tab_library)
-                                        },
-                                        style = if (wide) {
-                                            MaterialTheme.typography.headlineMedium
-                                        } else {
-                                            MaterialTheme.typography.titleLarge
-                                        },
-                                    )
-                                    if (showHome && !onboarding) {
-                                        pulse?.let { PulseLine(it, onOpenStats) }
-                                    } else if (!showSeries && !state.loading && state.books.isNotEmpty()) {
-                                        Text(
-                                            text = shelfCountLine(state),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            letterSpacing = 0.8.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                MainTabTopAppBar(
+                    title = when {
+                        archived -> R.string.filter_archived
+                        !layout.tabs || onboarding -> R.string.library_title
+                        showHome -> R.string.library_style_home
+                        showSeries -> R.string.home_tile_series
+                        else -> R.string.library_tab_library
                     },
-                    navigationIcon = {
-                        if (archived) {
-                            IconButton(
-                                onClick = { onToggleFilter(LibraryFilterOption.ARCHIVED) },
-                            ) {
-                                Icon(
-                                    Icons.AutoMirrored.Outlined.ArrowBack,
-                                    contentDescription = stringResource(R.string.back),
-                                )
-                            }
-                        }
-                    },
-                    // The tall bar exists to hold the brand tile; without
-                    // it, a title alone in that much space is just a gap.
-                    expandedHeight = if (archived) 64.dp else libraryBarHeight(barWidth),
+                    scrollBehavior = scrollBehavior,
+                    onBack = leaveArchive.takeIf { archived },
+                    onTitleClick = scrollCurrentToTop.takeUnless { archived },
                     actions = {
                         IconButton(onClick = { onSetSearchActive(true) }) {
                             Icon(
@@ -946,7 +843,6 @@ fun LibraryScreen(
                             }
                         }
                     },
-                    scrollBehavior = scrollBehavior,
                 )
             }
         },
@@ -1059,6 +955,8 @@ fun LibraryScreen(
                     showHome -> HomeLibrary(
                         state = state,
                         hero = heroDetail,
+                        pulse = pulse,
+                        onOpenStats = onOpenStats,
                         quote = homeQuote,
                         onOpenQuote = onOpenQuote,
                         onEditQuoteNote = onEditQuoteNote,
@@ -2176,10 +2074,8 @@ private fun BookGrid(
 internal typealias LibraryControls = @Composable (extra: (@Composable () -> Unit)?) -> Unit
 
 /**
- * The filters and the sort, on the one line every style puts above its
- * books. They share it because they answer the same question, "which
- * books and in what order", and stacking them cost a whole row of covers
- * for no reason.
+ * The filters and sort share a line above the books. The count below
+ * them reflects the active filters.
  */
 @Composable
 internal fun LibraryControlsRow(
@@ -2213,6 +2109,16 @@ internal fun LibraryControlsRow(
             onChooseStyle = onChooseStyle,
             extra = extra,
         )
+        if (!state.isSearchActive && !state.filters.archived && state.books.isNotEmpty()) {
+            Text(
+                text = shelfCountLine(state),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
     }
 }
 
@@ -3279,27 +3185,9 @@ private fun SortRow(
 private fun shelfCountLine(state: LibraryUiState): String {
     val shown = state.books.size
     val all = state.quickCounts.all
-    return if (state.filters.archived || shown >= all) {
+    return if (shown >= all) {
         pluralStringResource(R.plurals.library_book_count, shown, shown)
     } else {
         stringResource(R.string.library_shown_of, shown, all)
     }
-}
-
-/** Today's minutes and the streak under the Home title; opens the reading stats. */
-@Composable
-private fun PulseLine(pulse: ReadingPulse, onOpenStats: () -> Unit) {
-    val parts = listOfNotNull(
-        pulse.minutesToday.takeIf { it > 0 }?.let { stringResource(R.string.home_pulse_today, it) },
-        pulse.streakDays.takeIf { it > 0 }?.let { pluralStringResource(R.plurals.home_pulse_streak, it, it) },
-    )
-    Text(
-        text = parts.joinToString(" · "),
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        style = MaterialTheme.typography.labelSmall,
-        letterSpacing = 0.2.sp,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.clickable(onClickLabel = stringResource(R.string.reading_stats), onClick = onOpenStats),
-    )
 }
