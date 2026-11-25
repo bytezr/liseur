@@ -777,10 +777,11 @@ class SettingsBackupRepositoryTest {
     }
 
     @Test
-    fun `an exported custom font is restored with its content identity`() = runTest {
+    fun `a large custom font survives a backup round trip with its content identity`() = runTest {
         val sourceFonts = UserFontRepository(context, this, loadCheck = { true })
         sourceFonts.awaitReady()
         val fontBytes = SfntFixtures.sfnt(names = listOf(SfntFixtures.name(1, "Backup Font")))
+            .copyOf(50 * 1024 * 1024)
         assertTrue(sourceFonts.import(Uri.fromFile(writeFont(fontBytes)), "backup.ttf") is FontImportResult.Imported)
 
         val app = AppSettingsRepository(store("font-backup-app.preferences_pb"))
@@ -799,7 +800,7 @@ class SettingsBackupRepositoryTest {
 
         assertEquals(SettingsBackupRestoreResult.Restored(1, 0, 0), result)
         assertTrue(targetFonts.registry().contains("user:$digest"))
-        assertEquals(fontBytes.toList(), File(context.filesDir, "fonts/$digest.ttf").readBytes().toList())
+        assertEquals(digest, sha256(File(context.filesDir, "fonts/$digest.ttf").readBytes()))
     }
 
     @Test

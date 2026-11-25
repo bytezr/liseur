@@ -1815,6 +1815,7 @@ class SettingsBackupRepository internal constructor(
 
     private fun entryLimit(path: String): Long = when {
         path.startsWith("books/") -> bookLimits.maxBookBytes
+        path.startsWith("fonts/") -> UserFontRepository.MAX_BYTES
         path.startsWith("metadata_covers/") -> BookMetadataOverrideBackupRepository.MAX_COVER_BYTES
         path == METADATA_OVERRIDES_PATH -> BookMetadataOverrideBackupRepository.MAX_JSON_BYTES
         path == SESSIONS_PATH -> MAX_SESSIONS_BYTES
@@ -1882,10 +1883,11 @@ class SettingsBackupRepository internal constructor(
         private const val MAX_SETTINGS_BYTES = 1024L * 1024
         private const val MAX_MANIFEST_BYTES = 1024L * 1024
         private const val MAX_FONT_FILES = UserFontRepository.MAX_FONTS
-        private const val MAX_ENTRY_BYTES = UserFontRepository.MAX_BYTES
+        private const val MAX_ENTRY_BYTES = 16L * 1024 * 1024
         internal const val MAX_ARCHIVE_ENTRIES = MAX_FONT_FILES + 9 + MAX_BOOK_FILES
+        // Keep the aggregate non-book limit independent of the per-font limit.
         internal const val MAX_TOTAL_BYTES =
-            MAX_FONT_FILES * MAX_ENTRY_BYTES +
+            512L * 1024 * 1024 +
                 MAX_SETTINGS_BYTES +
                 MAX_MANIFEST_BYTES +
                 MAX_ANNOTATIONS_BYTES +

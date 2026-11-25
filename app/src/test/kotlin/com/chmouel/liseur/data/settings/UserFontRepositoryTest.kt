@@ -185,7 +185,7 @@ class UserFontRepositoryTest {
 
     @Test
     fun `an enormous file is abandoned rather than copied in whole`() = test { fonts ->
-        val huge = ByteArray(17 * 1024 * 1024)
+        val huge = ByteArray(50 * 1024 * 1024 + 1)
         SfntFixtures.sfnt().copyInto(huge)
 
         assertEquals(ImportResult.TooLarge, fonts.import(uriFor(huge), "video.ttf"))
