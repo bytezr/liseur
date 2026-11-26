@@ -118,9 +118,7 @@ import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -571,13 +569,11 @@ fun LibraryScreen(
     // Nothing to read or switch between yet: the empty-library onboarding
     // gets the whole screen. Still shown while loading, so a stocked
     // library does not have the bar pop in on every launch.
-    val onboarding = !state.loading && state.libraryIsEmpty && !state.hasArchived
-    val showBottomBar = layout.tabs && !state.isSearchActive && !archived && !onboarding
+    val onboarding = state.showOnboarding
+    val showBottomBar = state.showMainTabBar
     // Home is a tab of the app rather than a style of the library, so a
     // style saved as Home draws the catalogue as Classic instead. The tab
     // the reader picked wins over the saved one the app opens on.
-    SideEffect { tabs.libraryBar = showBottomBar }
-    DisposableEffect(tabs) { onDispose { tabs.libraryBar = false } }
     val homeTab = tabs.pickedHome ?: layout.startOnHome
     val catalogueStyle = if (layout.style == LibraryStyle.HOME) LibraryStyle.CLASSIC else layout.style
     val showHome = !archived && layout.tabs && homeTab

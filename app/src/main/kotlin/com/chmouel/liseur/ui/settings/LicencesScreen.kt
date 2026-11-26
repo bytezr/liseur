@@ -67,6 +67,7 @@ private val Components = listOf(
     Component("Kotlin standard library and coroutines", "Apache 2.0"),
     Component("OkHttp", "Apache 2.0"),
     Component("Coil", "Apache 2.0"),
+    Component("Haze", "Apache 2.0", notice = "Copyright 2024 Chris Banes"),
     Component(
         name = "AndroidSVG",
         licence = "Apache 2.0",

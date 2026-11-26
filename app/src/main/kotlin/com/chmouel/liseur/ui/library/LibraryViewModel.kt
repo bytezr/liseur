@@ -422,6 +422,12 @@ data class LibraryUiState(
     val trackLengths: Map<String, Float> = emptyMap(),
 )
 
+internal val LibraryUiState.showOnboarding: Boolean
+    get() = !loading && libraryIsEmpty && !hasArchived
+
+internal val LibraryUiState.showMainTabBar: Boolean
+    get() = layout.tabs && !isSearchActive && !filters.archived && !showOnboarding
+
 fun canMarkBookUnread(
     book: Book,
     progression: Double?,

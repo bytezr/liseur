@@ -1,19 +1,34 @@
 package com.chmouel.liseur.ui.navigation
 
+import android.os.SystemClock
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -34,10 +49,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -45,16 +64,35 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.chmouel.liseur.R
 import com.chmouel.liseur.ui.LocalEInk
+import com.chmouel.liseur.ui.rememberMotionRemoved
 import com.chmouel.liseur.ui.theme.homePalette
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazePerformanceMode
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.glass.GlassStyle
+import dev.chrisbanes.haze.glass.OpticalSizeValue
+import dev.chrisbanes.haze.glass.RefractionProfile
+import dev.chrisbanes.haze.glass.hazeGlass
+import dev.chrisbanes.haze.hazeSource
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /** The destinations of the bottom bar. Home, Library and Series are three views of the library screen. */
 enum class MainTab { HOME, LIBRARY, SERIES, STATS, SETTINGS }
@@ -62,15 +100,12 @@ enum class MainTab { HOME, LIBRARY, SERIES, STATS, SETTINGS }
 /**
  * What the bar shares with the library screen, which draws three of its
  * tabs. [pickedHome] is the Home or catalogue choice the reader made, null
- * until then so the saved start tab applies. [libraryBar] is whether the
- * library screen has room for the bar right now (no search, archive or
- * onboarding). [topRequest] counts reselections of the shown tab, each one
- * a request to scroll back to the top.
+ * until then so the saved start tab applies. [topRequest] counts reselections
+ * of the shown tab, each one a request to scroll back to the top.
  */
 @Stable
 class MainTabsState(pickedHome: Boolean? = null) {
     var pickedHome by mutableStateOf(pickedHome)
-    var libraryBar by mutableStateOf(false)
     var topRequest by mutableIntStateOf(0)
 
     companion object {
@@ -110,104 +145,311 @@ fun MutableList<Route>.selectTab(tab: MainTab) {
 
 private val BarHeight = 68.dp
 private val BarMargin = 12.dp
+private val BarInset = 6.dp
+private val BarShape = RoundedCornerShape(28.dp)
+private val TabSpacing = 2.dp
+private val TabShape = RoundedCornerShape(22.dp)
+private const val MaxDragSpeed = 12f
+private val TabSpring = spring<Float>(
+    dampingRatio = 0.83f,
+    stiffness = Spring.StiffnessMediumLow,
+    visibilityThreshold = 0.003f,
+)
 
 /** How much of the bottom of the window the bar covers, navigation bar included. */
 @Composable
 fun mainTabBarSpace(): Dp =
     BarHeight + BarMargin * 2 + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
-/**
- * The bottom bar: a floating pill holding the tabs, the selected one
- * on a tinted pill of its own. Flat and outlined on e-ink.
- */
+/** A glass bar with a moving lens over its labels and icons. */
 @Composable
 fun MainTabBar(
     selected: MainTab,
     onSelect: (MainTab) -> Unit,
     hasSeries: Boolean,
+    backdrop: HazeState?,
     modifier: Modifier = Modifier,
 ) {
-    val eInk = LocalEInk.current
     val palette = homePalette()
-    val shape = RoundedCornerShape(28.dp)
-    Surface(
-        shape = shape,
-        color = palette?.tabBar ?: MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, palette?.tabBarBorder ?: MaterialTheme.colorScheme.outline),
-        shadowElevation = if (eInk) 0.dp else 8.dp,
+    val barColor = palette?.tabBar ?: MaterialTheme.colorScheme.surface
+    val input = remember(backdrop) { backdrop?.let { HazeInput.Sources(it) } }
+    val tabs = remember(hasSeries) {
+        MainTab.entries.filter { it != MainTab.SERIES || hasSeries }
+    }
+    MainTabRow(
+        tabs = tabs,
+        selected = selected,
+        onSelect = onSelect,
+        backdrop = input,
+        barColor = barColor,
+        barBorder = BorderStroke(1.dp, palette?.tabBarBorder ?: MaterialTheme.colorScheme.outline),
         modifier = modifier
             .navigationBarsPadding()
             .padding(BarMargin)
             .widthIn(max = 560.dp)
             .fillMaxWidth()
             .height(BarHeight),
-    ) {
-        Row(
-            modifier = Modifier
-                .padding(6.dp)
-                .selectableGroup(),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            MainTab.entries.filter { it != MainTab.SERIES || hasSeries }.forEach { tab ->
-                TabItem(
-                    tab = tab,
-                    selected = tab == selected,
-                    onClick = { onSelect(tab) },
-                    modifier = Modifier.weight(1f),
-                )
+    )
+}
+
+@Composable
+private fun MainTabRow(
+    tabs: List<MainTab>,
+    selected: MainTab,
+    onSelect: (MainTab) -> Unit,
+    backdrop: HazeInput.Sources?,
+    barColor: Color,
+    barBorder: BorderStroke,
+    modifier: Modifier,
+) {
+    val eInk = LocalEInk.current
+    val motionEnabled = !eInk && !rememberMotionRemoved()
+    val selectedIndex = tabs.indexOf(selected)
+    val target = selectedIndex.coerceAtLeast(0).toFloat()
+    val lastIndex = tabs.lastIndex.toFloat()
+    val currentSelection by rememberUpdatedState(selected)
+    val selectTab by rememberUpdatedState(onSelect)
+    val layoutDirection = LocalLayoutDirection.current
+    val dragDirection = if (layoutDirection == LayoutDirection.Rtl) -1f else 1f
+    val tapPulse = remember { Animatable(0f) }
+    var taps by remember { mutableIntStateOf(0) }
+    LaunchedEffect(taps) {
+        if (taps == 0) return@LaunchedEffect
+        tapPulse.animateTo(1f, tween(durationMillis = 100))
+        tapPulse.animateTo(0f, spring(dampingRatio = 0.69f, stiffness = Spring.StiffnessMedium))
+    }
+
+    BoxWithConstraints(modifier) {
+        val itemWidth = ((maxWidth - BarInset * 2 - TabSpacing * tabs.lastIndex) / tabs.size).coerceAtLeast(0.dp)
+        val stride = with(LocalDensity.current) { (itemWidth + TabSpacing).toPx() }
+        var position by remember(tabs) { mutableFloatStateOf(target) }
+        var velocity by remember(tabs) { mutableFloatStateOf(0f) }
+        var dragging by remember(tabs, stride, layoutDirection, eInk) { mutableStateOf(false) }
+        var requestedIndex by remember(tabs) { mutableStateOf<Int?>(null) }
+        val destination = requestedIndex?.toFloat() ?: target
+        LaunchedEffect(target) { requestedIndex = null }
+        LaunchedEffect(destination, dragging, motionEnabled) {
+            if (dragging) return@LaunchedEffect
+            if (motionEnabled) {
+                animate(position, destination, initialVelocity = velocity, animationSpec = TabSpring) { value, speed ->
+                    if (!dragging) {
+                        position = value
+                        velocity = speed
+                    }
+                }
+            } else {
+                position = destination
+            }
+            if (!dragging) {
+                velocity = 0f
+                if (requestedIndex?.toFloat() == destination) requestedIndex = null
+            }
+        }
+        val drag = if (eInk || selectedIndex < 0) {
+            Modifier
+        } else {
+            Modifier.pointerInput(tabs, stride, layoutDirection) {
+                var lastMove = 0L
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        dragging = true
+                        requestedIndex = null
+                        position = position.coerceIn(0f, lastIndex)
+                        velocity = 0f
+                    },
+                    onDragCancel = {
+                        dragging = false
+                        velocity = 0f
+                    },
+                    onDragEnd = {
+                        val index = position.roundToInt().coerceIn(tabs.indices)
+                        if (SystemClock.uptimeMillis() - lastMove > 100L) velocity = 0f
+                        requestedIndex = index
+                        dragging = false
+                        if (tabs[index] != currentSelection) selectTab(tabs[index])
+                    },
+                ) { change, distance ->
+                    val next = (position + dragDirection * distance / stride).coerceIn(0f, lastIndex)
+                    val elapsed = (change.uptimeMillis - change.previousUptimeMillis).coerceAtLeast(1)
+                    val speed = ((next - position) * 1_000f / elapsed).coerceIn(-MaxDragSpeed, MaxDragSpeed)
+                    velocity += (speed - velocity) * 0.48f
+                    position = next
+                    lastMove = change.uptimeMillis
+                }
+            }
+        }
+        val marker = Modifier
+            .offset {
+                val index = if (motionEnabled || dragging) position else destination
+                val x = BarInset.toPx() + stride * index.coerceIn(0f, lastIndex)
+                IntOffset(x.roundToInt(), BarInset.roundToPx())
+            }
+            .width(itemWidth)
+            .height((maxHeight - BarInset * 2).coerceAtLeast(0.dp))
+            .graphicsLayer {
+                val speed = if (motionEnabled) (velocity / 7f).coerceIn(-1f, 1f) else 0f
+                val pulse = if (motionEnabled) tapPulse.value.coerceIn(-0.15f, 1f) else 0f
+                val tapScale = 1f + 0.34f * pulse
+                val travel = speed * (1f - pulse.coerceAtLeast(0f))
+                val stretch = abs(travel)
+                scaleX = tapScale + 0.14f * stretch
+                scaleY = tapScale - 0.09f * stretch
+                transformOrigin = TransformOrigin(0.5f - 0.12f * travel * dragDirection, 0.5f)
+            }
+        val highlightedIndex = if (dragging) position.roundToInt() else selectedIndex
+        // Record the bar above the page so the lens can sample both as it expands.
+        val capture = backdrop?.let { Modifier.hazeSource(it.state, zIndex = 1f) } ?: Modifier
+        Box(Modifier.fillMaxSize().then(capture)) {
+            Surface(
+                shape = BarShape,
+                color = if (backdrop == null) barColor else Color.Transparent,
+                border = barBorder,
+                shadowElevation = if (eInk) 0.dp else 5.dp,
+                modifier = Modifier.matchParentSize(),
+            ) {
+                if (backdrop != null) TabBarGlass(backdrop, barColor, Modifier.fillMaxSize())
+            }
+            if (backdrop == null && selectedIndex >= 0) {
+                TabIndicator(null, barColor, marker)
+            }
+            Row(
+                modifier = Modifier.fillMaxSize().padding(BarInset).then(drag).selectableGroup(),
+                horizontalArrangement = Arrangement.spacedBy(TabSpacing),
+            ) {
+                tabs.forEachIndexed { index, tab ->
+                    TabItem(
+                        tab = tab,
+                        selected = tab == selected,
+                        highlighted = index == highlightedIndex,
+                        glassEnabled = backdrop != null,
+                        dragging = dragging,
+                        onClick = {
+                            requestedIndex = null
+                            if (motionEnabled) taps++
+                            onSelect(tab)
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+        if (backdrop != null && selectedIndex >= 0) {
+            TabIndicator(backdrop, barColor, marker) {
+                if (motionEnabled) (abs(velocity) / 5f).coerceAtMost(1f) else 0f
             }
         }
     }
 }
 
 @Composable
+private fun TabBarGlass(backdrop: HazeInput.Sources, color: Color, modifier: Modifier) {
+    val style = remember(color) {
+        val tintAlpha = if (color.luminance() < 0.5f) 0.59f else 0.52f
+        GlassStyle.regular.then {
+            shape(BarShape)
+            backgroundColor(color)
+            tint(color.copy(alpha = tintAlpha))
+            lightPosition(Alignment.TopStart)
+            specularIntensity(0.42f)
+            optics {
+                copy(
+                    depth = OpticalSizeValue.Fixed(1f),
+                    blurRadius = OpticalSizeValue.Fixed(8.dp),
+                    refractionDisplacement = 14.dp,
+                    refractionProfile = RefractionProfile.Edge(12.dp),
+                )
+            }
+        }
+    }
+    Box(modifier.hazeGlass(backdrop, style))
+}
+
+@Composable
+private fun TabIndicator(
+    backdrop: HazeInput.Sources?,
+    barColor: Color,
+    modifier: Modifier,
+    motion: () -> Float = { 0f },
+) {
+    val colors = MaterialTheme.colorScheme
+    val fill = homePalette()?.tabSelected ?: colors.secondaryContainer
+    val decoration = when {
+        LocalEInk.current -> Modifier.border(1.dp, colors.onSurface, TabShape)
+        backdrop == null -> Modifier.background(fill, TabShape)
+        else -> {
+            val currentMotion by rememberUpdatedState(motion)
+            val style = remember(fill, barColor) {
+                GlassStyle.clear.then {
+                    shape(TabShape)
+                    backgroundColor(barColor)
+                    tint(fill.copy(alpha = 0.22f))
+                    lightPosition(Alignment.TopStart)
+                    specularIntensity(0.7f)
+                    optics {
+                        val movement = currentMotion()
+                        copy(
+                            depth = OpticalSizeValue.Fixed(1f),
+                            blurRadius = OpticalSizeValue.Fixed(0.dp),
+                            refractionDisplacement = (7f + 19f * movement).dp,
+                            refractionProfile = RefractionProfile.Edge((10f + 8f * movement).dp),
+                            refractionDetailIntensity = 0.16f * movement,
+                        )
+                    }
+                }
+            }
+            Modifier.hazeGlass(backdrop, style, performanceMode = HazePerformanceMode.Quality)
+        }
+    }
+    Box(modifier.then(decoration))
+}
+
+@Composable
 private fun TabItem(
     tab: MainTab,
     selected: Boolean,
+    highlighted: Boolean,
+    glassEnabled: Boolean,
+    dragging: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val eInk = LocalEInk.current
     val palette = homePalette()
-    val shape = RoundedCornerShape(22.dp)
     val tint = when {
         eInk -> MaterialTheme.colorScheme.onSurface
-        selected -> palette?.onTabSelected ?: MaterialTheme.colorScheme.onSecondaryContainer
+        highlighted -> palette?.onTabSelected ?: MaterialTheme.colorScheme.onSecondaryContainer
+        glassEnabled -> MaterialTheme.colorScheme.onSurface
         else -> palette?.onTab ?: MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Surface(
-        shape = shape,
-        color = when {
-            !selected -> Color.Transparent
-            eInk -> Color.Transparent
-            else -> palette?.tabSelected ?: MaterialTheme.colorScheme.secondaryContainer
-        },
-        border = if (selected && eInk) BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface) else null,
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
         modifier = modifier
             .fillMaxHeight()
-            .clip(shape)
-            .selectable(selected = selected, role = Role.Tab, onClick = onClick),
+            .clip(TabShape)
+            .selectable(
+                selected = selected,
+                role = Role.Tab,
+                interactionSource = null,
+                indication = if (dragging) null else LocalIndication.current,
+                onClick = onClick,
+            ),
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Icon(
-                imageVector = tab.icon(selected),
-                contentDescription = null,
-                tint = tint,
-                modifier = Modifier.size(24.dp),
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = stringResource(tab.label),
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                color = tint,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        Icon(
+            imageVector = tab.icon(highlighted),
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = stringResource(tab.label),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
+            color = tint,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

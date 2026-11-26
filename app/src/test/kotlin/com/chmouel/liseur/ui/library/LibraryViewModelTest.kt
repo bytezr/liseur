@@ -5,6 +5,7 @@ import com.chmouel.liseur.domain.FinishedOverride
 import com.chmouel.liseur.domain.LibraryFilterOption
 import com.chmouel.liseur.domain.LibraryFilters
 import com.chmouel.liseur.domain.LibraryLayout
+import com.chmouel.liseur.domain.LibraryScope
 import com.chmouel.liseur.domain.LibraryStyle
 import com.chmouel.liseur.domain.ShelfGrouping
 import com.chmouel.liseur.domain.groupedIntoSeries
@@ -177,6 +178,20 @@ class LibraryViewModelTest {
             assertEquals(0, recordCalls)
             assertTrue(removed)
         }
+
+    @Test
+    fun mainTabBarVisibilityFollowsLibraryState() {
+        val library = LibraryUiState(loading = false, libraryIsEmpty = false)
+        val emptyLibrary = library.copy(libraryIsEmpty = true)
+
+        assertTrue(library.showMainTabBar)
+        assertFalse(library.copy(isSearchActive = true).showMainTabBar)
+        assertFalse(library.copy(filters = LibraryFilters(setOf(LibraryFilterOption.ARCHIVED))).showMainTabBar)
+        assertFalse(library.copy(layout = LibraryLayout(scope = LibraryScope.SIMPLE)).showMainTabBar)
+        assertFalse(emptyLibrary.showMainTabBar)
+        assertTrue(emptyLibrary.copy(hasArchived = true).showMainTabBar)
+        assertTrue(emptyLibrary.copy(loading = true).showMainTabBar)
+    }
 
     @Test
     fun theSeriesTabShowsSeriesShelvesWithoutTouchingTheSavedLayout() {

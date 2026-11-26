@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -39,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalLocale
+import androidx.compose.ui.platform.LocalView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -74,6 +76,7 @@ import com.chmouel.liseur.ui.library.BookDetailsScreen
 import com.chmouel.liseur.ui.library.BookDetailsUiState
 import com.chmouel.liseur.ui.library.BookDetailsViewModel
 import com.chmouel.liseur.ui.library.canDownload
+import com.chmouel.liseur.ui.library.showMainTabBar
 import com.chmouel.liseur.translate.WholeBookTranslationScreen
 import com.chmouel.liseur.ui.library.BrowseLibrariesRoute
 import com.chmouel.liseur.ui.library.ConfirmLocalDeleteDialog
@@ -173,6 +176,8 @@ import com.chmouel.liseur.ui.settings.search.SettingsEntries
 import com.chmouel.liseur.ui.settings.search.SettingsFocus
 import com.chmouel.liseur.ui.settings.search.SettingsSearchScreen
 import com.chmouel.liseur.ui.settings.search.settingsAnchor
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 
 class MainActivity : ComponentActivity() {
     override fun attachBaseContext(newBase: Context) {
@@ -436,7 +441,17 @@ private fun LiseurApp(
         }
     }
     val shownTab = backStack.mainTab(libraryTab)?.takeIf {
-        libraryLayout.tabs && (it != libraryTab || tabs.libraryBar)
+        if (it == libraryTab) libraryState.showMainTabBar else libraryLayout.tabs
+    }
+    val tabBarBackdrop = if (
+        shownTab != null &&
+        !eInk &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        LocalView.current.isHardwareAccelerated
+    ) {
+        rememberHazeState()
+    } else {
+        null
     }
     val selectTab: (MainTab) -> Unit = { tab ->
         if (tab == shownTab) {
@@ -471,6 +486,7 @@ private fun LiseurApp(
     Box(Modifier.fillMaxSize()) {
     NavDisplay(
         backStack = backStack,
+        modifier = tabBarBackdrop?.let { Modifier.hazeSource(it) } ?: Modifier,
         onBack = backOrHome,
         sceneStrategies = listOf(listDetail),
         entryDecorators = listOf(
@@ -1061,6 +1077,7 @@ private fun LiseurApp(
             selected = tab,
             onSelect = selectTab,
             hasSeries = libraryState.series.isNotEmpty(),
+            backdrop = tabBarBackdrop,
             modifier = Modifier.align(Alignment.BottomCenter),
         )
     }
