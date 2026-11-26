@@ -52,7 +52,7 @@ make dev-logcat      # logcat filtered to its pid
 
 - `applicationId` is `com.chmouel.liseur.dev`: own Room database,
   DataStore, SAF grant and server device key; cannot touch the real app.
-  Launcher "Liseur (dev)" with retinted icon (all of `app/src/dev/res/`).
+  The launcher shows "Liseur (dev)" with the standard Liseur icon.
   APK: `app/build/outputs/apk/play/dev/app-play-dev.apk`, debug-signed.
 - Device-facing targets (`install`, `run`, `reset`, `dev-*`) and
   `hack/install*` use `play` unless `FLAVOR=foss`.

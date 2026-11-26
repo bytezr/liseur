@@ -13,7 +13,6 @@ import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.FavoriteBorder
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.CloudDownload
@@ -30,7 +29,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -74,6 +72,7 @@ import com.chmouel.liseur.domain.LibraryStyle
 import com.chmouel.liseur.ui.library.styles.LibraryStyleSheet
 import com.chmouel.liseur.ui.library.styles.label
 import com.chmouel.liseur.ui.contentWidthCap
+import com.chmouel.liseur.ui.navigation.MainTabTopAppBar
 import com.chmouel.liseur.ui.reading.label
 import com.chmouel.liseur.ui.navigation.Route
 import com.chmouel.liseur.ui.settings.search.ExpandForSettingsFocus
@@ -126,7 +125,7 @@ fun SettingsScreen(
     /** Optional flavor-backed Book server summary when no RemoteServer is connected. */
     librarySyncSummary: String? = null,
 ) {
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     val folders by libraryFolders.collectAsStateWithLifecycle(emptyList())
     val hidden by hiddenBooks.collectAsStateWithLifecycle(emptyList())
     var choosingStyle by remember { mutableStateOf(false) }
@@ -134,24 +133,15 @@ fun SettingsScreen(
     Scaffold(
         modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            LargeTopAppBar(
-                title = { Text(stringResource(R.string.settings)) },
-                navigationIcon = {
-                    if (onBack != null) {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                Icons.AutoMirrored.Outlined.ArrowBack,
-                                contentDescription = stringResource(R.string.back),
-                            )
-                        }
-                    }
-                },
+            MainTabTopAppBar(
+                title = R.string.settings,
+                scrollBehavior = scrollBehavior,
+                onBack = onBack,
                 actions = {
                     IconButton(onClick = onOpenSearch) {
                         Icon(Icons.Outlined.Search, contentDescription = stringResource(R.string.settings_search))
                     }
                 },
-                scrollBehavior = scrollBehavior,
             )
         },
     ) { padding ->

@@ -414,7 +414,7 @@ class UserFontRepository(
         private const val TEMP = ".tmp"
 
         private const val BUFFER = 64 * 1024
-        internal const val MAX_BYTES = 16L * 1024 * 1024
+        internal const val MAX_BYTES = 50L * 1024 * 1024
         internal const val MAX_FONTS = 32
 
         /**
