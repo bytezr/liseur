@@ -34,6 +34,13 @@ interface DriveAccountDao {
     @Query("SELECT * FROM drive_account WHERE state = 'ACTIVE' LIMIT 1")
     suspend fun active(): DriveAccount?
 
+    @Query(
+        "SELECT * FROM drive_account ORDER BY " +
+            "CASE state WHEN 'ACTIVE' THEN 0 WHEN 'NEEDS_RECONNECT' THEN 1 ELSE 2 END, " +
+            "connected_at DESC LIMIT 1",
+    )
+    suspend fun primary(): DriveAccount?
+
     @Query("SELECT * FROM drive_account WHERE permission_id = :permissionId")
     suspend fun get(permissionId: String): DriveAccount?
 
@@ -84,6 +91,9 @@ interface DriveAccountDao {
     @Query("UPDATE drive_account SET metered_transfers = :metered WHERE permission_id = :permissionId")
     suspend fun setMeteredTransfers(permissionId: String, metered: Boolean)
 
+    @Query("UPDATE drive_account SET upload_selection_at = :at WHERE permission_id = :permissionId")
+    suspend fun setUploadSelectionAt(permissionId: String, at: Long)
+
     @Query(
         "UPDATE drive_account SET pending_switch_previous_state = :previousState " +
             "WHERE permission_id = :permissionId",
@@ -130,6 +140,12 @@ interface DriveCursorDao {
     )
     suspend fun pausedForAccount(permissionId: String): List<DriveCursor>
 
+    @Query(
+        "SELECT * FROM drive_cursor WHERE permission_id = :permissionId AND paused_schema_version IS NOT NULL " +
+            "ORDER BY device_id, domain",
+    )
+    fun observePausedForAccount(permissionId: String): Flow<List<DriveCursor>>
+
     @Upsert
     suspend fun upsert(cursor: DriveCursor)
 }
@@ -157,6 +173,12 @@ interface DriveFileDao {
     @Upsert
     suspend fun upsert(file: DriveFile)
 
+    @Query(
+        "SELECT * FROM drive_file WHERE permission_id = :permissionId AND kind = 'epub' AND trashed = 0 " +
+            "ORDER BY created_time, file_id",
+    )
+    fun observeLiveEpubFiles(permissionId: String): Flow<List<DriveFile>>
+
     @Query("UPDATE drive_file SET trashed = :trashed WHERE permission_id = :permissionId AND file_id = :fileId")
     suspend fun setTrashed(permissionId: String, fileId: String, trashed: Boolean)
 
@@ -178,6 +200,18 @@ interface DriveOutboxDao {
     @Query("SELECT * FROM drive_outbox WHERE permission_id = :permissionId ORDER BY seq ASC")
     suspend fun forAccount(permissionId: String): List<DriveOutbox>
 
+    @Query(
+        "SELECT * FROM drive_outbox WHERE permission_id = :permissionId AND state = 'ACKED' " +
+            "AND seq <= :throughSeq ORDER BY seq ASC",
+    )
+    suspend fun ackedUpTo(permissionId: String, throughSeq: Long): List<DriveOutbox>
+
+    @Query(
+        "SELECT * FROM drive_outbox WHERE permission_id = :permissionId AND state = 'ACKED' " +
+            "AND seq > :afterSeq ORDER BY seq ASC",
+    )
+    suspend fun ackedAfter(permissionId: String, afterSeq: Long): List<DriveOutbox>
+
     @Upsert
     suspend fun upsert(entry: DriveOutbox)
 
@@ -186,6 +220,9 @@ interface DriveOutboxDao {
 
     @Query("UPDATE drive_outbox SET state = 'ACKED', file_id = :fileId WHERE permission_id = :permissionId AND seq = :seq")
     suspend fun markAcked(permissionId: String, seq: Long, fileId: String)
+
+    @Query("DELETE FROM drive_outbox WHERE permission_id = :permissionId AND state = 'ACKED' AND seq = :seq")
+    suspend fun deleteAckedSeq(permissionId: String, seq: Long)
 }
 
 @Dao
@@ -202,17 +239,35 @@ interface DriveRecordStateDao {
     )
     suspend fun forDomain(permissionId: String, domain: String): List<DriveRecordState>
 
+    @Query(
+        "SELECT * FROM drive_record_state WHERE permission_id = :permissionId AND domain = :domain " +
+            "ORDER BY record_key",
+    )
+    fun observeDomain(permissionId: String, domain: String): Flow<List<DriveRecordState>>
+
     @Query("SELECT * FROM drive_record_state WHERE permission_id = :permissionId ORDER BY domain, record_key")
     suspend fun forAccount(permissionId: String): List<DriveRecordState>
 
+    @Query(
+        "SELECT * FROM drive_record_state WHERE permission_id = :permissionId AND held = 1 " +
+            "ORDER BY domain, record_key",
+    )
+    suspend fun heldForAccount(permissionId: String): List<DriveRecordState>
+
     @Upsert
     suspend fun upsert(state: DriveRecordState)
+
+    @Upsert
+    suspend fun upsertAll(states: List<DriveRecordState>)
 
     @Query(
         "DELETE FROM drive_record_state WHERE permission_id = :permissionId AND domain = :domain " +
             "AND record_key = :recordKey",
     )
     suspend fun delete(permissionId: String, domain: String, recordKey: String)
+
+    @Query("DELETE FROM drive_record_state WHERE permission_id = :permissionId AND domain = :domain")
+    suspend fun deleteDomain(permissionId: String, domain: String)
 }
 
 @Dao
@@ -245,6 +300,12 @@ interface DriveResolutionDao {
 
     @Upsert
     suspend fun upsert(resolution: DriveResolution)
+
+    @Query(
+        "DELETE FROM drive_resolution WHERE permission_id = :permissionId AND domain = :domain " +
+            "AND record_key = :recordKey",
+    )
+    suspend fun deleteForRecord(permissionId: String, domain: String, recordKey: String)
 }
 
 @Dao
@@ -287,6 +348,37 @@ interface DriveConflictDao {
             "WHERE permission_id = :permissionId AND conflict_id = :conflictId",
     )
     suspend fun markResolving(permissionId: String, conflictId: String, choice: String)
+
+    @Query(
+        "UPDATE drive_conflict SET state = 'OPEN', choice = NULL " +
+            "WHERE permission_id = :permissionId AND conflict_id = :conflictId AND state = 'RESOLVING'",
+    )
+    suspend fun reopen(permissionId: String, conflictId: String)
+
+    /**
+     * Gives bookless conflicts their book once the work has one again, so a competition that
+     * was parked while nothing could hold it becomes the reader's to settle.
+     */
+    @Query(
+        "UPDATE drive_conflict SET book_url = :bookUrl WHERE permission_id = :permissionId " +
+            "AND domain = :domain AND record_key = :recordKey AND state = 'OPEN' AND book_url IS NULL",
+    )
+    suspend fun attachBookUrl(permissionId: String, domain: String, recordKey: String, bookUrl: String)
+
+    @Query(
+        "SELECT * FROM drive_conflict WHERE permission_id = :permissionId AND domain = :domain " +
+            "AND record_key = :recordKey ORDER BY opened_at ASC, conflict_id ASC",
+    )
+    suspend fun forRecord(permissionId: String, domain: String, recordKey: String): List<DriveConflict>
+
+    @Query("DELETE FROM drive_conflict WHERE permission_id = :permissionId AND conflict_id = :conflictId")
+    suspend fun delete(permissionId: String, conflictId: String)
+
+    @Query(
+        "UPDATE drive_conflict SET book_url = :toBookUrl WHERE permission_id = :permissionId " +
+            "AND book_url = :fromBookUrl",
+    )
+    suspend fun moveBookUrl(permissionId: String, fromBookUrl: String, toBookUrl: String)
 
     @Query(
         "UPDATE drive_conflict SET state = 'RESOLVED', choice = :choice, resolution_fp = :resolutionFp, " +
@@ -339,6 +431,91 @@ interface DriveUploadDao {
     )
     suspend fun pendingForAccount(permissionId: String): List<DriveUpload>
 
+    @Query("UPDATE drive_upload SET selected_at = :before WHERE permission_id = :permissionId AND selected_at >= :activation")
+    suspend fun holdSelectionsBefore(permissionId: String, activation: Long, before: Long)
+
+    /** Moves one upload from [from] to [to] only if it is still in [from]; returns rows changed. */
+    @Query(
+        "UPDATE drive_upload SET state = :to, updated_at = :now " +
+            "WHERE permission_id = :permissionId AND sha256 = :sha256 AND state = :from",
+    )
+    suspend fun transition(permissionId: String, sha256: String, from: String, to: String, now: Long): Int
+
+    /** Drops a row only while it is still in [state] and holds no session or file to clean up. */
+    @Query(
+        "DELETE FROM drive_upload WHERE permission_id = :permissionId AND sha256 = :sha256 " +
+            "AND state = :state AND session_uri IS NULL AND file_id IS NULL",
+    )
+    suspend fun deleteIfIdle(permissionId: String, sha256: String, state: String): Int
+
+    /** Drops a cancelled row only while it still holds the observed session and file. */
+    @Query(
+        "DELETE FROM drive_upload WHERE permission_id = :permissionId AND sha256 = :sha256 " +
+            "AND state = 'CANCELLED' AND session_uri IS :sessionUri AND file_id IS :fileId",
+    )
+    suspend fun deleteIfCancelled(permissionId: String, sha256: String, sessionUri: String?, fileId: String?): Int
+
+    /** Keeps a file recovered from a completed session on its own cleanup row, whatever the state. */
+    @Query(
+        "UPDATE drive_upload SET file_id = :fileId WHERE permission_id = :permissionId AND sha256 = :sha256 " +
+            "AND state IN ('CANCELLED', 'REQUEUE', 'SUPPRESSED') AND session_uri IS :sessionUri AND file_id IS NULL",
+    )
+    suspend fun recordRecoveredFile(permissionId: String, sha256: String, sessionUri: String?, fileId: String): Int
+
+    /**
+     * Re-selects a cancelled row through [bookUrl], keeping its session and file for cleanup.
+     *
+     * [selectedAt] dates a selection made by hand, which also clears an automatic mark: the
+     * cleanup obligation outlives both.
+     */
+    @Query(
+        "UPDATE drive_upload SET state = 'REQUEUE', book_url = :bookUrl, size_bytes = :sizeBytes, " +
+            "selected_at = COALESCE(:selectedAt, selected_at), " +
+            "auto_selected = CASE WHEN :selectedAt IS NULL THEN auto_selected ELSE 0 END, updated_at = :now " +
+            "WHERE permission_id = :permissionId AND sha256 = :sha256 AND state = 'CANCELLED'",
+    )
+    suspend fun requeueWithSource(
+        permissionId: String,
+        sha256: String,
+        bookUrl: String,
+        sizeBytes: Long,
+        selectedAt: Long?,
+        now: Long,
+    ): Int
+
+    /** Points a still-REQUEUE row at the copy selected last. */
+    @Query(
+        "UPDATE drive_upload SET book_url = :bookUrl, size_bytes = :sizeBytes, " +
+            "selected_at = COALESCE(:selectedAt, selected_at), " +
+            "auto_selected = CASE WHEN :selectedAt IS NULL THEN auto_selected ELSE 0 END, updated_at = :now " +
+            "WHERE permission_id = :permissionId AND sha256 = :sha256 AND state = 'REQUEUE'",
+    )
+    suspend fun retainRequeueSource(
+        permissionId: String,
+        sha256: String,
+        bookUrl: String,
+        sizeBytes: Long,
+        selectedAt: Long?,
+        now: Long,
+    ): Int
+
+    /** Turns a cleaned-up REQUEUE row into a fresh upload, only if it still holds the observed session and file. */
+    @Query(
+        "UPDATE drive_upload SET state = 'PENDING', session_uri = NULL, bytes_sent = 0, file_id = NULL, " +
+            "updated_at = :now WHERE permission_id = :permissionId AND sha256 = :sha256 AND state = 'REQUEUE' " +
+            "AND session_uri IS :sessionUri AND file_id IS :fileId",
+    )
+    suspend fun requeueAfterCleanup(permissionId: String, sha256: String, sessionUri: String?, fileId: String?, now: Long): Int
+
+    /** Queue entries, cancelled uploads whose Drive copy still has to be cleaned up, and
+     * suppressed rows still holding one. */
+    @Query(
+        "SELECT COUNT(*) FROM drive_upload WHERE permission_id = :permissionId " +
+            "AND (state IN ('PENDING', 'UPLOADING', 'FAILED', 'CANCELLED', 'REQUEUE') " +
+            "OR (state = 'SUPPRESSED' AND (session_uri IS NOT NULL OR file_id IS NOT NULL)))",
+    )
+    suspend fun workCount(permissionId: String): Int
+
     @Query("SELECT * FROM drive_upload WHERE permission_id = :permissionId ORDER BY selected_at ASC, sha256 ASC")
     suspend fun forAccount(permissionId: String): List<DriveUpload>
 
@@ -347,7 +524,8 @@ interface DriveUploadDao {
 
     @Query(
         "UPDATE drive_upload SET state = :state, session_uri = :sessionUri, bytes_sent = :bytesSent, " +
-            "updated_at = :updatedAt WHERE permission_id = :permissionId AND sha256 = :sha256",
+            "updated_at = :updatedAt WHERE permission_id = :permissionId AND sha256 = :sha256 " +
+            "AND state IN ('PENDING', 'UPLOADING', 'FAILED')",
     )
     suspend fun updateProgress(
         permissionId: String,
@@ -356,7 +534,19 @@ interface DriveUploadDao {
         sessionUri: String?,
         bytesSent: Long,
         updatedAt: Long,
+    ): Int
+
+    @Query(
+        "UPDATE drive_upload SET state = :state, updated_at = :updatedAt " +
+            "WHERE permission_id = :permissionId AND sha256 = :sha256 " +
+            "AND state IN ('PENDING', 'UPLOADING', 'FAILED')",
     )
+    suspend fun updateState(
+        permissionId: String,
+        sha256: String,
+        state: String,
+        updatedAt: Long,
+    ): Int
 
     @Query(
         "UPDATE drive_upload SET state = 'UPLOADED', file_id = :fileId, session_uri = NULL, " +
@@ -364,6 +554,95 @@ interface DriveUploadDao {
             "WHERE permission_id = :permissionId AND sha256 = :sha256",
     )
     suspend fun markUploaded(permissionId: String, sha256: String, fileId: String, updatedAt: Long)
+
+    @Query(
+        "UPDATE drive_upload SET state = 'UPLOADED', file_id = :fileId, session_uri = NULL, " +
+            "bytes_sent = size_bytes, updated_at = :updatedAt " +
+            "WHERE permission_id = :permissionId AND sha256 = :sha256 " +
+            "AND state IN ('PENDING', 'UPLOADING', 'FAILED')",
+    )
+    suspend fun markUploadedIfSelected(permissionId: String, sha256: String, fileId: String, updatedAt: Long): Int
+
+    @Query(
+        "UPDATE drive_upload SET state = 'SUPPRESSED', session_uri = NULL, file_id = NULL, updated_at = :now " +
+            "WHERE permission_id = :permissionId AND state = 'UPLOADED' AND file_id = :fileId",
+    )
+    suspend fun suppressUploadedByFileId(permissionId: String, fileId: String, now: Long)
+
+    /**
+     * Suppresses a deleted edition: another device may have uploaded those bytes, and
+     * a queue row of its own must not send them up again. A row the reader asked for by
+     * hand keeps its state; only the automatic offer's own row is cancelled.
+     */
+    suspend fun suppressEdition(permissionId: String, sha256: String, now: Long) {
+        if (get(permissionId, sha256) == null) {
+            upsert(
+                DriveUpload(
+                    permissionId = permissionId,
+                    sha256 = sha256,
+                    // No local edition of these bytes here: nothing to point the row at.
+                    bookUrl = "",
+                    sizeBytes = 0L,
+                    state = DriveUpload.STATE_SUPPRESSED,
+                    selectedAt = now,
+                    updatedAt = now,
+                ),
+            )
+            return
+        }
+        suppressAutomatic(permissionId, sha256, now)
+    }
+
+    /**
+     * Cancels the automatic offer's queued work for [sha256]. Any session or file that work
+     * started stays on the row, because its copy in Drive still has to be trashed.
+     */
+    @Query(
+        "UPDATE drive_upload SET state = 'SUPPRESSED', bytes_sent = 0, updated_at = :now " +
+            "WHERE permission_id = :permissionId AND sha256 = :sha256 AND auto_selected = 1 " +
+            "AND state IN ('PENDING', 'UPLOADING', 'FAILED')",
+    )
+    suspend fun suppressAutomatic(permissionId: String, sha256: String, now: Long): Int
+
+    /**
+     * Re-selects a suppressed row that still holds something to trash. Cleanup decides what
+     * the row becomes, so the reader's request never resumes a session whose file was deleted.
+     */
+    @Query(
+        "UPDATE drive_upload SET state = 'REQUEUE', book_url = :bookUrl, size_bytes = :sizeBytes, " +
+            "selected_at = COALESCE(:selectedAt, selected_at), " +
+            "auto_selected = CASE WHEN :selectedAt IS NULL THEN auto_selected ELSE 0 END, updated_at = :now " +
+            "WHERE permission_id = :permissionId AND sha256 = :sha256 AND state = 'SUPPRESSED' " +
+            "AND (session_uri IS NOT NULL OR file_id IS NOT NULL)",
+    )
+    suspend fun requeueSuppressed(
+        permissionId: String,
+        sha256: String,
+        bookUrl: String,
+        sizeBytes: Long,
+        selectedAt: Long?,
+        now: Long,
+    ): Int
+
+    /** Drops what a suppressed row's cancelled upload left in Drive, once cleanup trashed it. */
+    @Query(
+        "UPDATE drive_upload SET session_uri = NULL, file_id = NULL, bytes_sent = 0, updated_at = :now " +
+            "WHERE permission_id = :permissionId AND sha256 = :sha256 AND state = 'SUPPRESSED' " +
+            "AND session_uri IS :sessionUri AND file_id IS :fileId",
+    )
+    suspend fun clearSuppressedCleanup(
+        permissionId: String,
+        sha256: String,
+        sessionUri: String?,
+        fileId: String?,
+        now: Long,
+    ): Int
+
+    @Query(
+        "DELETE FROM drive_upload WHERE permission_id = :permissionId AND sha256 = :sha256 " +
+            "AND book_url = :bookUrl AND state IN ('PENDING', 'UPLOADING', 'FAILED')",
+    )
+    suspend fun deleteIfSelected(permissionId: String, sha256: String, bookUrl: String): Int
 
     @Query("DELETE FROM drive_upload WHERE permission_id = :permissionId AND sha256 = :sha256")
     suspend fun delete(permissionId: String, sha256: String)

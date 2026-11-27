@@ -19,7 +19,7 @@ and two-device acceptance test matrix for Liseur's Play-only Google Drive sync
 | `deviceId` | Lowercase UUIDv4 (`36` chars) | Generated once per install in `drive_sync.db` (`drive_install.device_id`), excluded from Android backup/transfer. Never derived from `DeviceIdentity.id`. |
 | `hlc` | `String.format(Locale.ROOT, "%013d-%04x-%s", wallMs, counter, deviceId)` | Monotonic hybrid logical clock persisted in `drive_account(hlc_wall_ms, hlc_counter)`. Compared lexicographically (strict total order because `deviceId` breaks ties). On send: if `nowMs > wallMs`, `wallMs = nowMs; counter = 0`, else `counter += 1`. **Counter overflow:** when `counter` would become `0x10000`, do NOT widen the field — set `wallMs += 1` (a logical tick strictly ahead of any real clock reading) and reset `counter = 0`, so the fixed-width `%04x` stays 4 hex digits and lexicographic ordering stays monotonic across the overflow. On receive: `maxWall = max(localWall, nowMs, remoteWall)`; update `counter` accordingly. |
 | `batchId` | `UUID.nameUUIDFromBytes("batch|$deviceId|$seq".toByteArray(UTF_8)).toString()` | Deterministic per `(deviceId, seq)` for idempotent retry deduplication in `appDataFolder`. |
-| `workKey` | `"isbn:<isbn13>"` \| `"dc:<sha256hex>"` \| `"sha:<editionSha256>"` \| `"stub:<sha256hex>"` | For local/downloaded books, computed once `book_fingerprint` exists AND `books.file_metadata_checked = 1`. First match wins: (1) normalized ISBN-13 via `hardcover/Isbn.from` on `WorkIdentifiers.dcFrom(books.work_id, ...)` or `book_metadata(source='file').identifiers`; (2) `sha256Hex(trim.lowercase(id))` for any usable `dc:identifier` not in `USELESS_IDENTIFIERS`; (3) `book_fingerprint.sha256`. **Shared-identifier collision:** a local file's ISBN or `dc:` key falls back to `sha:<editionSha>` when that key already names a different edition (another local book, or a catalog entry whose `editions[]` lacks this sha) with a different normalized title+author, so two unrelated EPUBs carrying the same erroneous identifier stay separate. Known v1 limitation: two devices that each mint the same key for different books before either sees the other's catalog publish one catalog entry with two editions, and v1 has no split operation for it. **Fileless preserved stubs on Server → Drive switch** (where `BookRemoval.downloadRemoved()` cleared `book_fingerprint` and `file_metadata_checked = 0`, or the book was never downloaded): captured **before** `forgetSyncPeer(server)` deletes server `work_alias` rows in priority order: (1) ISBN-13 from `books.work_id` or `book_metadata(source='catalog'\|'file').identifiers`; (2) usable `dc:identifier` from `books.work_id` or `book_metadata(source='catalog'\|'file').identifiers`; (3) `sha:<edition_sha>` from the retiring server's `work_alias.edition_sha`; (4) deterministic portable fallback `stub:<sha256Hex("liseur-stub\|v1\|" + book.url)>` when none of (1)–(3) exist (later mergeable with a downloaded EPUB via title+author confirmed matching emitting a `workAlias` `merge:` record). Upserted into `work_alias(peer_id = drive:<permissionId>, confidence = 'high', confirmed = 1, seeded = 0)` so preserved fileless books seed Drive immediately. Frozen in `work_alias.work_id` once published; a stronger identifier found later emits a `workAlias` record instead of rekeying. |
+| `workKey` | `"isbn:<isbn13>"` \| `"dc:<sha256hex>"` \| `"sha:<editionSha256>"` \| `"stub:<sha256hex>"` | For local/downloaded books, computed once `book_fingerprint` exists AND `books.file_metadata_checked = 1`. First match wins: (1) normalized ISBN-13 via `hardcover/Isbn.from` on `WorkIdentifiers.dcFrom(books.work_id, ...)` or `book_metadata(source='file').identifiers`; (2) `sha256Hex(trim.lowercase(id))` for any usable `dc:identifier` not in `USELESS_IDENTIFIERS`; (3) `book_fingerprint.sha256`. **Shared-identifier collision:** a local file's ISBN or `dc:` key falls back to `sha:<editionSha>` when that key already names a different edition (another local book, or a catalog entry whose `editions[]` lacks this sha) with a different normalized title+author, so two unrelated EPUBs carrying the same erroneous identifier stay separate. When two devices each mint the same key for different books before either sees the other's catalog, the receiver re-keys after the fact: on pulling a catalog entry under that key whose editions lack its local sha and whose normalized title+author differ, the device whose own entry was published later (higher HLC) moves its book to `sha:<editionSha>` and drops its edition from the shared entry, while the earlier publisher keeps the key. Known v1 limitations: this re-key happens only on the two devices holding the colliding files; a device holding neither (a catalog-only `drive:` stub) or a fresh install that reads both original entries can keep both editions under the shared key, because v1 has no durable split record; and book-scoped records the re-keyed device had already published under the shared key are not migrated. **Fileless preserved stubs on Server → Drive switch** (where `BookRemoval.downloadRemoved()` cleared `book_fingerprint` and `file_metadata_checked = 0`, or the book was never downloaded): captured **before** `forgetSyncPeer(server)` deletes server `work_alias` rows in priority order: (1) ISBN-13 from `books.work_id` or `book_metadata(source='catalog'\|'file').identifiers`; (2) usable `dc:identifier` from `books.work_id` or `book_metadata(source='catalog'\|'file').identifiers`; (3) `sha:<edition_sha>` from the retiring server's `work_alias.edition_sha`; (4) deterministic portable fallback `stub:<sha256Hex("liseur-stub\|v1\|" + book.url)>` when none of (1)–(3) exist (later mergeable with a downloaded EPUB via title+author confirmed matching emitting a `workAlias` `merge:` record). Upserted into `work_alias(peer_id = drive:<permissionId>, confidence = 'high', confirmed = 1, seeded = 0)` so preserved fileless books seed Drive immediately. Frozen in `work_alias.work_id` once published; a stronger identifier found later emits a `workAlias` record instead of rekeying. |
 | `conflictId` | `sha256Hex("$domain|$recordKey|${minOf(fpA, fpB)}|${maxOf(fpA, fpB)}")` | Primary key (with `permission_id`) in `drive_conflict`. |
 
 **Locale-independent wire numbers.** Every number written into a wire string
@@ -235,7 +235,7 @@ Record envelope fields:
 | `anc` | `Array<String>` | Always | Superseded version fps, newest first, deduplicated, capped at **64** entries (`[]` for append-only domains and new records). |
 | `resRefs` | `Array<String>` | Always | Sorted, deduplicated, **uncapped** list of winning resolution fps (`resolveFp`) from which this record causally descends, carried forward across every successor edit, delete, or resolution outside the 64-entry `anc` cap (`[]` for append-only domains and records with no prior resolution in their ancestry; excluded from `fp`). |
 | `body` | `Object \| null` | Always | Domain payload object for `op == "put"` and `op == "resolve" && outcome == "put"`; strictly `null` for `op == "del"` and `op == "resolve" && outcome == "delete"`. |
-| `observed` | `Object<deviceId, seq>` | Only when `d == "vocabWord" && op == "del"` | Vector of the highest delta `seq` the deleting device had applied from each other device when it authored the delete — the causal boundary for the word's reviews and occurrences (§4.9) — **plus the deleter's own entry**: `observed[<deleter deviceId>]` is the `seq` of the batch that first carries the `del`, written in the freeze transaction that allocates that `seq` (§2.3). The own entry is part of the stored vector, so a child published by the deleter at or before that batch is covered by the same `observed[deviceId] >= seq` test as any other device's, and one published later (`A:6` after a delete at `A:5`) is not. No receiver derives the deleter or its batch from the envelope, a snapshot's `throughSeq`, or a republisher's batch. A value that is not an object decodes to `{}`, which keeps data, and a vector with no entry for the deleter covers none of the deleter's own children. Absent otherwise. Excluded from `delFp` (§1.3). Snapshots and `revives.delRecord` keep it unchanged. |
+| `observed` | `Object<deviceId, seq>` | Only when `d == "vocabWord" && op == "del"` (per record; a delta batch may also carry a batch-level `observed` object, used when the record has none) | Vector of the highest delta `seq` the deleting device had applied from each other device when it authored the delete — the causal boundary for the word's reviews and occurrences (§4.9) — **plus the deleter's own entry**: `observed[<deleter deviceId>]` is the `seq` of the batch that first carries the `del`, written in the freeze transaction that allocates that `seq` (§2.3). The own entry is part of the stored vector, so a child published by the deleter at or before that batch is covered by the same `observed[deviceId] >= seq` test as any other device's, and one published later (`A:6` after a delete at `A:5`) is not. No receiver derives the deleter or its batch from the envelope, a snapshot's `throughSeq`, or a republisher's batch. A value that is not an object decodes to `{}`, which keeps data, and a vector with no entry for the deleter covers none of the deleter's own children. Absent otherwise. Excluded from `delFp` (§1.3). Snapshots and `revives.delRecord` keep it unchanged. |
 | `restore` | `Object` | Only when `d == "vocabWord" && op == "del"` (required there) | `{"fp": <version `fp` of the last live word version>, "hlc": <record hlc of that version>, "body": <that full vocabWord body, §4.9>}`: the parent content a receiver needs to restore the word when a review or occurrence it did not cover arrives later. It is the last live version the deleter held before deleting, so `fp` is `anc[0]`. The record's own `body` stays `null`, so the general `op: "del"` contract is unchanged. Excluded from `delFp`. Snapshots keep it on the `del` record, so a device rebuilt from snapshots has it. A `del` without a valid `restore` is malformed: it is not applied (no cascade, nothing is deleted), it counts as committed for the batch cursor (§3.3), and the receiver logs it. |
 | `seq` | `Long` | Snapshot `vocabOccurrence` / `vocabReview` records only | The author's delta `seq` that first published this version. Readers store it as the record's provenance instead of `snapshot.throughSeq`, so a later `vocabWord` `del` whose `observed` vector covers that seq still counts the record as seen. `throughSeq` only advances cursors. A record with no known provenance counts as unseen. |
 | `revives` | `Object` | Only when `d == "vocabWord" && op == "put"` and the put is a revival (§4.9) | `{"del": <delFp>, "restore": <restore.fp>, "delRecord": {...}}`. Required exactly when `fp` is a `reviveFp` (§1.3); a receiver recomputes `reviveFp(revives.del, revives.restore)` and rejects the record as malformed if it differs from `fp`. `delRecord` is the complete originating `del` as its author wrote it: `{"hlc", "anc", "resRefs", "observed", "restore"}` (the `del` fields above, without `d`, `k`, `op`, `body` and `fp`, which are `revives.del`; `observed` is the vector as authored, including the deleter's own entry, so the delete's original batch boundary survives the revival). It lets a receiver that never saw the `del` order it against a later concurrent delete (hlc, ancestry) and judge children against its `observed` vector (§4.9). The record is malformed, and not applied, if `delFp(d, k, delRecord.hlc) != revives.del` or `delRecord.restore.fp != revives.restore`. `anc` is `[revives.del, revives.restore]` followed by the revived version's other ancestry. Excluded from `fp`. Snapshots keep it on the revival record. |
@@ -506,6 +506,9 @@ snapshot, `R.seq = snapshot.throughSeq`):
    `restore` and `observed` of `L` always come from one record, and the losing `del`'s
    payloads are discarded, never copied beside the winning `fp`, so every
    delivery order of two distinct deletes yields the same causal boundary.
+   A `del` `fp` embeds its authoring `hlc`, so it is immutable, and
+   `last_hlc := max(last_hlc, R.hlc)` in every case, so the next minted
+   version cannot reuse a clock the adopted record already used.
    For concurrent live puts with equal bodies, adopt the higher `(hlc, fp)`
    as `L` the same way (the row is unchanged) and keep the other `fp` in
    `anc(L)`; `published_fp := R.fp` only when `R` is adopted, because a
@@ -946,9 +949,10 @@ with outcome `delete`) when it reaches those records:
     `sizeBytes` prefers non-null, then the greater value; `identifiers` union; `addedAt = minOf`; `archivedAt` comes
     from the body with the higher `archiveHlc` (the record HLC only when
     neither has one), so a newer record that merely carries an old archive
-    state, such as an edition upload, never overrides a later archive choice;
-    `title`, `author`, `fileSeriesName`, `fileSeriesIndex` and `updatedAt`
-    come from the body whose record has the higher `(hlc, fp)`.
+    state, such as an edition upload, never overrides a later archive choice,
+    and an archive change made locally but not yet collected is kept over a
+    pull; `title`, `author`, `fileSeriesName`, `fileSeriesIndex` and
+    `updatedAt` come from the body whose record has the higher `(hlc, fp)`.
   - **`hidden_at` is excluded** (local-only).
 - **`del` semantics:**
   - Published **only** by explicit **Delete from synced library** (never by
@@ -1220,7 +1224,12 @@ with outcome `delete`) when it reaches those records:
     `Pull` raises `local_revision`, so a second stream with a different
     position opens `Conflict` in either enumeration order. Required tests:
     upload before pull, three devices (C19), and fresh-device reconstruction
-    in both enumeration orders.
+    in both enumeration orders. The wire format cannot prove that a writer
+    saw another writer's position before moving on, so a sequential handoff
+    can also require a choice when the intermediate agreement was not seen.
+    A pending writer position retains its HLC so seeding cannot replace a
+    newer conflict with an older cached record. The account row records the
+    revision of an imported unread reset separately from a local reset.
 - **`del` semantics:** Not used ("Mark unread" is a `put` with
   `finishedOverride = "unread"` and non-null `unreadResetAt`).
 - **Room mapping (`liseur.db`):**
@@ -1269,7 +1278,8 @@ with outcome `delete`) when it reaches those records:
     `peak_revision`, which restarts per book and so cannot order peaks against
     work-wide floors. A peak is bound to its allocated `seq` in the same
     transaction that allocates it, so retries re-send the same `seq`; the
-    binding is dropped when the book's peak changes.
+    binding is dropped when the book's peak changes. Internal `_`-prefixed
+    domains are never published.
   - Merge rule: ignore if `seq <= maxFloor[workKey][deviceId]`; otherwise apply
     via `FurthestPositionDao.observe` (keeps max `progression` per
     `(peer_id, work_id, edition, origin = deviceId)`). A peak that `observe`
@@ -1311,17 +1321,18 @@ with outcome `delete`) when it reaches those records:
     snapshots. The visible peak is therefore a function of the set of peaks
     and floors received, never of their delivery order: a peak above the
     floor survives whether it arrives before or after the reset.
-  - Forgetting applies to the whole work, not one edition. The reset record
-    and its floors (the authoring device's floor is its highest allocated
-    `seq`) are persisted in `drive_sync.db` first. Local effects follow: delete
+  - Forgetting applies to the whole work, not one edition. The reset record,
+    its floors (the authoring device's floor is its highest allocated `seq`)
+    and a local-only replay marker are persisted in `drive_sync.db` first.
+    Local effects follow: delete
     the covered `furthest_position` rows, reset the local `reading_progress`
     peak of every local edition of the work whose bound `seq` is at or below
     its device floor, and clear that edition's `peak_delivery`. Resetting the
     local peak is required: otherwise a book that was at 80% and is now at 20%
     could not record a new peak at 30%, because capture needs a strict
-    increase. A peak that is unsent or newer than the floor is preserved. An
-    interrupted forget is completed on the next sync by replaying the persisted
-    reset before pulling.
+    increase. A peak that is unsent or newer than the floor is preserved. The marker is
+    cleared last; each sync replays any remaining marker before pulling, so an
+    interrupted forget completes.
 - **`del` semantics:** Not used.
 - **Room mapping (`liseur.db`):**
   - `furthest_position`: `peer_id = drive:<permissionId>`, `work_id = workKey`,
@@ -1751,6 +1762,24 @@ with outcome `delete`) when it reaches those records:
     local word and children, and republishing as in **Delete vs. uncovered
     child** (a revival when `L ∈ D.anc`, otherwise a `putFp` put with the
     `del` fp in `anc`).
+
+  - **Durable delete boundary:** when a `del` takes effect (applied remotely,
+    or our own acknowledged), the device keeps the per-word max-merge of its
+    `observed` vector as local-only record state, never published. A later
+    `vocabReview` `put` whose `(deviceId, seq)` provenance that vector covers
+    is neither staged nor inserted, so a delayed, replayed or reordered
+    historical review cannot reattach to a re-collected word. Staged reviews
+    the vector covers are dropped when the `del` takes effect; uncovered,
+    concurrent ones are kept.
+  - **Review undo vs. word delete:** only an explicit undo publishes a review
+    `del`. The per-review sync row is created before the `put` is published, so
+    an undo during an unacknowledged upload is still recorded. A review that
+    disappeared because its word was deleted, or while duplicate rows were
+    coalesced, is never published as an undo. A pulled review `del` removes
+    every local copy of the event, including duplicate unowned and
+    retired-account words, and a legacy null-`syncId` review whose
+    deterministic id (§4.11) is already tombstoned is deleted rather than
+    backfilled.
   - `ownerAccount`: Drive reads the visible vocabulary set (matching
     `VocabularyDao.exportWords()`, including `ownerAccount = ''` and retired
     `liseur-sync` rows), deduplicated by `(language, normalized)`. Newly pulled

@@ -3,10 +3,18 @@ package com.chmouel.liseur.drive
 import android.app.Activity
 import android.app.PendingIntent
 import android.content.Intent
+import android.util.Log
 import androidx.annotation.StringRes
 import com.chmouel.liseur.R
+import com.chmouel.liseur.data.db.Book
 import com.chmouel.liseur.data.db.LiseurDatabase
+import com.chmouel.liseur.data.db.MetadataOverrideFields
 import com.chmouel.liseur.data.remote.RemoteAccountRepository
+import com.chmouel.liseur.domain.PersonalEvaluation
+import com.chmouel.liseur.domain.seriesIndexLabel
+import com.chmouel.liseur.domain.seriesKey
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.common.api.CommonStatusCodes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -21,6 +29,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
 
 /** Exact local library counts shown before seeding or switching to a Google Drive account. */
 data class LocalLibrarySummary(
@@ -56,14 +65,42 @@ data class PendingAccountSwitchConfirmation(
     val targetDisplayName: String get() = targetEmail.ifBlank { targetPermissionId }
 }
 
+/** Display model for one unresolved conflict (or one shelf-grouped series conflict). */
+data class DriveConflictUiGroup(
+    val groupId: String,
+    val domain: String,
+    val kind: String,
+    val bookTitle: String,
+    val fieldLabel: String?,
+    val localSummary: String,
+    val remoteSummary: String,
+    val localDeleted: Boolean,
+    val remoteDeleted: Boolean,
+    val conflicts: List<DriveConflict>,
+) {
+    /** Series shelves always choose between device orders; Keep edited/Delete applies to other domains. */
+    val offersKeepEditedOrDelete: Boolean
+        get() = kind == DriveConflict.KIND_DELETE_EDIT && domain != DriveWireCodec.DOMAIN_SERIES
+}
+
 /** Snapshot rendered by Play's Google Drive Sync Settings UI. */
 data class DriveSettingsUiState(
     val account: DriveAccount? = null,
     val pausedAccounts: List<DriveAccount> = emptyList(),
     val pendingUploadsCount: Int = 0,
     val unresolvedConflictsCount: Int = 0,
+    val unresolvedConflictGroups: List<DriveConflictUiGroup> = emptyList(),
+    val conflictsDialogVisible: Boolean = false,
+    val resolvingConflict: Boolean = false,
+    val pausedSchemaDeviceLabels: List<String> = emptyList(),
+    val pendingWorkMatches: List<DrivePendingWorkMatch> = emptyList(),
+    val meteredTransfers: Boolean = false,
+    val uploadPickerVisible: Boolean = false,
+    val uploadCandidates: List<DriveUploadCandidate> = emptyList(),
+    val syncingNow: Boolean = false,
     val busy: Boolean = false,
     @param:StringRes val errorMessageRes: Int? = null,
+    val errorMessage: String? = null,
     val pendingConfirmation: PendingAccountSwitchConfirmation? = null,
     val pendingAuthIntent: PendingIntent? = null,
 )
@@ -119,6 +156,12 @@ internal class DriveAccountController(
     private data class EphemeralState(
         val busy: Boolean = false,
         @param:StringRes val errorMessageRes: Int? = null,
+        val errorMessage: String? = null,
+        val syncingNow: Boolean = false,
+        val uploadPickerVisible: Boolean = false,
+        val uploadCandidates: List<DriveUploadCandidate> = emptyList(),
+        val conflictsDialogVisible: Boolean = false,
+        val resolvingConflict: Boolean = false,
         val pendingConfirmation: PendingAccountSwitchConfirmation? = null,
         val pendingAuthIntent: PendingIntent? = null,
     )
@@ -128,6 +171,9 @@ internal class DriveAccountController(
         val pausedAccounts: List<DriveAccount> = emptyList(),
         val pendingUploadsCount: Int = 0,
         val unresolvedConflictsCount: Int = 0,
+        val unresolvedConflictGroups: List<DriveConflictUiGroup> = emptyList(),
+        val pausedSchemaDeviceLabels: List<String> = emptyList(),
+        val pendingWorkMatches: List<DrivePendingWorkMatch> = emptyList(),
     )
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -148,15 +194,42 @@ internal class DriveAccountController(
                     if (primary == null) {
                         flowOf(StoreSnapshot(account = null, pausedAccounts = paused))
                     } else {
+                        val peerId = DriveLibrarySync.accountPeerId(primary.permissionId)
+                        // Both work-identity counters only exist to wake the snapshot up.
+                        val workIdentityTriggers = combine(
+                            database.workIdentityDao().observeAmbiguityCount(peerId),
+                            database.workIdentityDao().observeAwaitingAnswer(peerId),
+                        ) { ambiguity, awaiting -> ambiguity to awaiting }
                         combine(
                             db.uploads().observePendingCount(primary.permissionId),
-                            db.conflicts().observeOpenCount(primary.permissionId),
-                        ) { pendingUploads, openConflicts ->
+                            db.conflicts().observeOpen(primary.permissionId),
+                            db.cursors().observePausedForAccount(primary.permissionId),
+                            workIdentityTriggers,
+                            // Conflict cards depend on whether their book is on the shelf, so a book
+                            // being added or removed has to rebuild them on its own.
+                            database.bookDao().observeAll(),
+                        ) { pendingUploads, openConflicts, pausedCursors, _, _ ->
+                            val pausedLabels = pausedCursors
+                                .map { it.deviceId }
+                                .distinct()
+                                .map { devId ->
+                                    db.devices().get(primary.permissionId, devId)?.label
+                                        ?.takeIf { it.isNotBlank() } ?: devId
+                                }
+                            val matches = runCatching {
+                                driveSync.workIdentity.pendingMatches(primary.permissionId)
+                            }.getOrDefault(emptyList())
+                            val conflictGroups = runCatching {
+                                buildConflictUiGroups(openConflicts)
+                            }.getOrDefault(emptyList())
                             StoreSnapshot(
                                 account = primary,
                                 pausedAccounts = paused,
                                 pendingUploadsCount = pendingUploads,
-                                unresolvedConflictsCount = openConflicts,
+                                unresolvedConflictsCount = conflictGroups.size,
+                                unresolvedConflictGroups = conflictGroups,
+                                pausedSchemaDeviceLabels = pausedLabels,
+                                pendingWorkMatches = matches,
                             )
                         }
                     }
@@ -169,8 +242,18 @@ internal class DriveAccountController(
                 pausedAccounts = storeSnapshot.pausedAccounts,
                 pendingUploadsCount = storeSnapshot.pendingUploadsCount,
                 unresolvedConflictsCount = storeSnapshot.unresolvedConflictsCount,
+                unresolvedConflictGroups = storeSnapshot.unresolvedConflictGroups,
+                conflictsDialogVisible = ui.conflictsDialogVisible && storeSnapshot.unresolvedConflictGroups.isNotEmpty(),
+                resolvingConflict = ui.resolvingConflict,
+                pausedSchemaDeviceLabels = storeSnapshot.pausedSchemaDeviceLabels,
+                pendingWorkMatches = storeSnapshot.pendingWorkMatches,
+                meteredTransfers = storeSnapshot.account?.meteredTransfers == true,
+                uploadPickerVisible = ui.uploadPickerVisible,
+                uploadCandidates = ui.uploadCandidates,
+                syncingNow = ui.syncingNow,
                 busy = ui.busy,
                 errorMessageRes = ui.errorMessageRes,
+                errorMessage = ui.errorMessage,
                 pendingConfirmation = ui.pendingConfirmation,
                 pendingAuthIntent = ui.pendingAuthIntent,
             )
@@ -275,15 +358,39 @@ internal class DriveAccountController(
     /** Handles the result of launching Play Services' interactive authorization [PendingIntent]. */
     suspend fun onAuthorizationActivityResult(resultCode: Int, data: Intent?) {
         transitionMutex.withLock {
+            Log.i(TAG, "Authorization activity returned code=$resultCode, hasData=${data != null}, awaiting=$awaitingAuthorizationResult")
             if (!awaitingAuthorizationResult) return
             awaitingAuthorizationResult = false
             ephemeral.value = ephemeral.value.copy(pendingAuthIntent = null)
             try {
-                if (resultCode != Activity.RESULT_OK || data == null) {
+                if (data == null) {
                     ephemeral.value = ephemeral.value.copy(busy = false)
                     return
                 }
-                when (val parsed = authClient.parseAuthorizationResult(data)) {
+                val parsed = authClient.parseAuthorizationResult(data)
+                when (parsed) {
+                    is DriveAuthResult.Authorized -> Log.i(TAG, "Authorization response contained a token")
+                    is DriveAuthResult.NeedsResolution -> Log.i(TAG, "Authorization response requires another resolution")
+                    is DriveAuthResult.Failed -> Log.w(
+                        TAG,
+                        "Authorization response failed: status=${(parsed.cause as? ApiException)?.statusCode}, " +
+                            "type=${parsed.cause?.javaClass?.simpleName}",
+                    )
+                }
+                if (resultCode != Activity.RESULT_OK) {
+                    val failed = parsed as? DriveAuthResult.Failed
+                    val status = (failed?.cause as? ApiException)?.statusCode
+                    ephemeral.value = ephemeral.value.copy(
+                        busy = false,
+                        errorMessageRes = if (failed != null && status != CommonStatusCodes.CANCELED) {
+                            R.string.drive_sync_error_auth_failed
+                        } else {
+                            null
+                        },
+                    )
+                    return
+                }
+                when (parsed) {
                     is DriveAuthResult.Authorized -> handleAuthorizedTokenLocked(parsed.accessToken)
                     is DriveAuthResult.NeedsResolution -> {
                         ephemeral.value = ephemeral.value.copy(
@@ -362,6 +469,7 @@ internal class DriveAccountController(
                 pendingAccessToken = null
                 ephemeral.value = EphemeralState()
                 driveSync.notifyActivated()
+                presentInitialUploadSelection()
             } catch (e: CancellationException) {
                 ephemeral.value = ephemeral.value.copy(busy = false)
                 throw e
@@ -420,6 +528,351 @@ internal class DriveAccountController(
     /** Dismisses a transient error banner in the UI. */
     fun clearError() {
         ephemeral.value = ephemeral.value.copy(errorMessageRes = null)
+    }
+
+    /** Triggers an immediate `drive.appdata` sync cycle. */
+    suspend fun syncNow() {
+        if (ephemeral.value.syncingNow) return
+        ephemeral.value = ephemeral.value.copy(syncingNow = true, errorMessage = null)
+        try {
+            driveSync.changeEngine.sync()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ephemeral.value = ephemeral.value.copy(
+                errorMessage = e.message ?: "Google Drive sync failed",
+            )
+        } finally {
+            ephemeral.value = ephemeral.value.copy(syncingNow = false)
+        }
+    }
+
+    /** Opens the Play-only "Upload EPUB files" selection UI for the active Drive account. */
+    suspend fun openUploadPicker() {
+        if (!driveSync.hasStore()) return
+        val active = driveSync.store.accounts().active() ?: return
+        val candidates = driveSync.epubTransfers.listUploadCandidates(active.permissionId)
+        ephemeral.value = ephemeral.value.copy(
+            uploadPickerVisible = true,
+            uploadCandidates = candidates,
+        )
+    }
+
+    /** Closes the "Upload EPUB files" selection UI without modifying the upload queue. */
+    fun closeUploadPicker() {
+        ephemeral.value = ephemeral.value.copy(uploadPickerVisible = false)
+    }
+
+    /**
+     * Asks for the selection ADR-0078 requires before the first EPUB goes up on a newly
+     * activated account; the offer stays off until it is answered.
+     */
+    private suspend fun presentInitialUploadSelection() {
+        val active = if (driveSync.hasStore()) driveSync.store.accounts().active() else null
+        if (active != null && active.uploadSelectionAt == null) openUploadPicker()
+    }
+
+    /** Updates whether bulk EPUB transfers may use metered mobile networks (default: unmetered only). */
+    suspend fun setMeteredTransfers(allowMetered: Boolean) {
+        if (!driveSync.hasStore()) return
+        val active = driveSync.store.accounts().active() ?: return
+        driveSync.store.accounts().setMeteredTransfers(active.permissionId, allowMetered)
+        if (driveSync.store.uploads().workCount(active.permissionId) > 0) {
+            driveSync.triggerEpubUploads(allowMetered)
+        }
+    }
+
+    /** Reconciles the upload queue with the picker selection and schedules the bulk upload worker. */
+    suspend fun confirmUploadSelection(selectedBookUrls: Set<String>) {
+        if (!driveSync.hasStore()) return
+        val (generation, active) = transitionMutex.withLock {
+            accountGeneration to driveSync.store.accounts().active()
+        }
+        if (active == null) return
+        // The cutoff and the rows the answer drops are one write, so an ALWAYS emission holding
+        // the old cutoff cannot pair with rows the picker is about to deselect, and a worker
+        // starting in between cannot upload a book this answer left out.
+        val queued = driveSync.epubTransfers.queueSelectedBooks(active.permissionId, selectedBookUrls, clock())
+        // Fingerprinting can outlast an account switch. The answer's rows belong to its own
+        // account and stay written, but the picker and the shared worker now belong to the next one.
+        transitionMutex.withLock {
+            if (generation != accountGeneration) return
+            ephemeral.value = ephemeral.value.copy(uploadPickerVisible = false)
+            if (queued > 0 || driveSync.store.uploads().workCount(active.permissionId) > 0) {
+                // Also covers cleanup of uploads just cancelled: the replaced worker resolves their sessions.
+                driveSync.triggerEpubUploads(active.meteredTransfers)
+            } else {
+                driveSync.cancelEpubUploads()
+            }
+        }
+    }
+
+    /**
+     * Takes the picker's answer off the settings screen's hands. The write, the
+     * fingerprinting and the worker it schedules run on [driveSync.scope], because
+     * leaving Settings mid-way must not drop a selection the reader already made.
+     */
+    fun submitUploadSelection(selectedBookUrls: Set<String>) {
+        driveSync.scope.launch { confirmUploadSelection(selectedBookUrls) }
+    }
+
+    /** Opens the Play-only Conflict Resolution dialog. */
+    fun openConflictsDialog() {
+        ephemeral.value = ephemeral.value.copy(conflictsDialogVisible = true)
+    }
+
+    /** Closes the Play-only Conflict Resolution dialog. */
+    fun closeConflictsDialog() {
+        ephemeral.value = ephemeral.value.copy(conflictsDialogVisible = false)
+    }
+
+    /** Resolves one conflict or shelf-grouped series conflict and publishes `op: "resolve"`. */
+    suspend fun resolveConflictGroup(group: DriveConflictUiGroup, choice: DriveConflictChoice) {
+        if (ephemeral.value.resolvingConflict) return
+        ephemeral.value = ephemeral.value.copy(resolvingConflict = true, errorMessage = null)
+        try {
+            driveSync.resolveConflicts(group.conflicts, choice, syncAfter = true)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ephemeral.value = ephemeral.value.copy(
+                errorMessage = e.message ?: "Could not resolve Google Drive conflict",
+            )
+        } finally {
+            ephemeral.value = ephemeral.value.copy(resolvingConflict = false)
+        }
+    }
+
+    /** Deletes [book] from the Google Drive synced library (durable tombstone + Drive EPUB trash). */
+    suspend fun deleteFromSyncedLibrary(book: Book): Boolean =
+        driveSync.deleteFromSyncedLibrary(book)
+
+    /** Builds UI conflict cards, grouping `series` conflicts by `seriesKey` per `docs/DRIVE_SYNC.md` §4.4. */
+    internal suspend fun buildConflictUiGroups(openConflicts: List<DriveConflict>): List<DriveConflictUiGroup> {
+        if (openConflicts.isEmpty()) return emptyList()
+        val booksByUrl = database.bookDao().allOnce().associateBy { it.url }
+        // Hide conflicts whose book does not exist locally yet (held records and hidden annotations).
+        val visibleConflicts = openConflicts.filter { conflict ->
+            val url = conflict.bookUrl ?: return@filter false
+            booksByUrl[url] != null
+        }
+        if (visibleConflicts.isEmpty()) return emptyList()
+        val result = mutableListOf<DriveConflictUiGroup>()
+
+        val seriesConflicts = visibleConflicts.filter { it.domain == DriveWireCodec.DOMAIN_SERIES }
+        val nonSeriesConflicts = visibleConflicts.filter { it.domain != DriveWireCodec.DOMAIN_SERIES }
+
+        // 1. Per-record conflicts for annotation, evaluation, and metadata.
+        for (conflict in nonSeriesConflicts) {
+            val book = conflict.bookUrl?.let { booksByUrl[it] }
+            val bookTitle = book?.title ?: conflict.recordKey
+            when (conflict.domain) {
+                DriveWireCodec.DOMAIN_ANNOTATION -> {
+                    val localAnn = database.annotationDao().byId(conflict.recordKey)
+                    val remoteAnn = conflict.remoteJson?.let { raw ->
+                        runCatching { DriveWireCodec.decodeAnnotationBody(JSONObject(raw)) }.getOrNull()
+                    }
+                    val localText = localAnn?.let { ann ->
+                        listOfNotNull(
+                            ann.note?.takeIf { it.isNotBlank() },
+                            ann.text?.takeIf { it.isNotBlank() }?.let { "“$it”" },
+                            ann.chapter?.takeIf { it.isNotBlank() },
+                        ).joinToString(" · ").ifBlank { ann.kind }
+                    } ?: ""
+                    val remoteText = remoteAnn?.let { ann ->
+                        listOfNotNull(
+                            ann.note?.takeIf { it.isNotBlank() },
+                            ann.text?.takeIf { it.isNotBlank() }?.let { "“$it”" },
+                            ann.chapter?.takeIf { it.isNotBlank() },
+                        ).joinToString(" · ").ifBlank { ann.kind }
+                    } ?: ""
+                    result.add(
+                        DriveConflictUiGroup(
+                            groupId = conflict.conflictId,
+                            domain = conflict.domain,
+                            kind = conflict.kind,
+                            bookTitle = bookTitle,
+                            fieldLabel = localAnn?.kind ?: remoteAnn?.kind,
+                            localSummary = localText,
+                            remoteSummary = remoteText,
+                            localDeleted = localAnn == null,
+                            remoteDeleted = remoteAnn == null,
+                            conflicts = listOf(conflict),
+                        ),
+                    )
+                }
+                DriveWireCodec.DOMAIN_EVALUATION -> {
+                    val field = DriveEvaluationSync.parseRecordKey(conflict.recordKey)?.second ?: ""
+                    val localEval = conflict.bookUrl?.let { database.bookEvaluationDao().get(it, field) }
+                    val remoteEval = conflict.remoteJson?.let { raw ->
+                        runCatching { DriveWireCodec.decodeEvaluationBody(JSONObject(raw)) }.getOrNull()
+                    }
+                    val formatVal: (String?) -> String = { raw ->
+                        when {
+                            raw == null -> ""
+                            field == PersonalEvaluation.RATING -> {
+                                val stars = raw.toIntOrNull()?.let { it / 2.0 }
+                                if (stars != null) "${seriesIndexLabel(stars)} / 5" else raw
+                            }
+                            else -> raw
+                        }
+                    }
+                    result.add(
+                        DriveConflictUiGroup(
+                            groupId = conflict.conflictId,
+                            domain = conflict.domain,
+                            kind = conflict.kind,
+                            bookTitle = bookTitle,
+                            fieldLabel = field,
+                            localSummary = formatVal(localEval?.value),
+                            remoteSummary = formatVal(remoteEval?.value),
+                            localDeleted = localEval?.value == null,
+                            remoteDeleted = remoteEval == null,
+                            conflicts = listOf(conflict),
+                        ),
+                    )
+                }
+                DriveWireCodec.DOMAIN_METADATA -> {
+                    val field = DriveMetadataSync.parseRecordKey(conflict.recordKey)?.second ?: ""
+                    val remoteBody = conflict.remoteJson?.let { raw ->
+                        runCatching { DriveWireCodec.decodeMetadataBody(JSONObject(raw)) }.getOrNull()
+                    }
+                    val (localSummary, localDeleted) = when (field) {
+                        MetadataOverrideFields.TITLE ->
+                            (book?.userTitle.orEmpty()) to (book?.titleOverridden != true)
+                        MetadataOverrideFields.AUTHOR ->
+                            (book?.userAuthor.orEmpty()) to (book?.authorOverridden != true)
+                        MetadataOverrideFields.DESCRIPTION ->
+                            (book?.userDescription.orEmpty()) to (book?.descriptionOverridden != true)
+                        MetadataOverrideFields.COVER ->
+                            (if (book?.coverOverridden == true && !book.userCoverPath.isNullOrBlank()) "Custom cover" else "") to
+                                (book?.coverOverridden != true || book.userCoverPath.isNullOrBlank())
+                        else -> "" to true
+                    }
+                    val remoteSummary = when (remoteBody) {
+                        is DriveMetadataBody.Text -> remoteBody.value
+                        is DriveMetadataBody.Cover -> "Custom cover (${remoteBody.width}×${remoteBody.height})"
+                        null -> ""
+                    }
+                    result.add(
+                        DriveConflictUiGroup(
+                            groupId = conflict.conflictId,
+                            domain = conflict.domain,
+                            kind = conflict.kind,
+                            bookTitle = bookTitle,
+                            fieldLabel = field,
+                            localSummary = localSummary,
+                            remoteSummary = remoteSummary,
+                            localDeleted = localDeleted,
+                            remoteDeleted = remoteBody == null,
+                            conflicts = listOf(conflict),
+                        ),
+                    )
+                }
+            }
+        }
+
+        // 2. Group `series` conflicts by `seriesKey` into shelf-level choices.
+        if (seriesConflicts.isNotEmpty()) {
+            val grouped = linkedMapOf<String, MutableList<DriveConflict>>()
+            val shelfNames = mutableMapOf<String, String>()
+            for (conflict in seriesConflicts) {
+                val book = conflict.bookUrl?.let { booksByUrl[it] }
+                val remoteBody = conflict.remoteJson?.let { raw ->
+                    runCatching { DriveWireCodec.decodeSeriesBody(JSONObject(raw)) }.getOrNull()
+                }
+                val localSeriesName = if (book?.seriesOverridden == true) {
+                    book.userSeriesName
+                } else {
+                    book?.seriesName ?: book?.catalogSeriesName ?: book?.fileSeriesName
+                }
+                val localKey = seriesKey(localSeriesName)
+                val remoteKey = remoteBody?.seriesKey.orEmpty()
+                val groupKey = localKey.ifBlank { remoteKey }.ifBlank { conflict.conflictId }
+                grouped.getOrPut(groupKey) { mutableListOf() }.add(conflict)
+                if (groupKey !in shelfNames) {
+                    val display = localSeriesName?.takeIf { it.isNotBlank() }
+                        ?: remoteBody?.userSeriesName?.takeIf { it.isNotBlank() }
+                        ?: book?.title
+                        ?: conflict.recordKey
+                    shelfNames[groupKey] = display
+                }
+            }
+            for ((groupKey, members) in grouped) {
+                val localEntries = members.map { c ->
+                    val book = c.bookUrl?.let { booksByUrl[it] }
+                    val idx = book?.userSeriesIndex ?: book?.seriesIndex
+                    val label = seriesIndexLabel(idx)?.let { "#$it " }.orEmpty() + (book?.title ?: c.recordKey)
+                    (idx ?: Double.MAX_VALUE) to label
+                }.sortedBy { it.first }.map { it.second }
+                val remoteEntries = members.map { c ->
+                    val book = c.bookUrl?.let { booksByUrl[it] }
+                    val remoteBody = c.remoteJson?.let { raw ->
+                        runCatching { DriveWireCodec.decodeSeriesBody(JSONObject(raw)) }.getOrNull()
+                    }
+                    val idx = remoteBody?.userSeriesIndex
+                    val label = if (remoteBody == null) {
+                        "(Default) ${book?.title ?: c.recordKey}"
+                    } else {
+                        seriesIndexLabel(idx)?.let { "#$it " }.orEmpty() + (book?.title ?: c.recordKey)
+                    }
+                    (idx ?: Double.MAX_VALUE) to label
+                }.sortedBy { it.first }.map { it.second }
+
+                val hasDeleteEdit = members.any { it.kind == DriveConflict.KIND_DELETE_EDIT }
+                val allLocalDeleted = members.all { c ->
+                    val b = c.bookUrl?.let { booksByUrl[it] }
+                    b?.seriesOverridden != true && b?.indexOverridden != true
+                }
+                val allRemoteDeleted = members.all { it.remoteJson == null }
+                result.add(
+                    DriveConflictUiGroup(
+                        groupId = "series:$groupKey",
+                        domain = DriveWireCodec.DOMAIN_SERIES,
+                        kind = if (hasDeleteEdit) DriveConflict.KIND_DELETE_EDIT else DriveConflict.KIND_EDIT_EDIT,
+                        bookTitle = shelfNames[groupKey] ?: groupKey,
+                        fieldLabel = DriveWireCodec.DOMAIN_SERIES,
+                        localSummary = localEntries.joinToString(", "),
+                        remoteSummary = remoteEntries.joinToString(", "),
+                        localDeleted = allLocalDeleted,
+                        remoteDeleted = allRemoteDeleted,
+                        conflicts = members,
+                    ),
+                )
+            }
+        }
+
+        return result
+    }
+
+    /** Explicitly confirms an ambiguous title/author match and publishes a `workAlias` merge record. */
+    suspend fun confirmWorkMatch(match: DrivePendingWorkMatch) {
+        if (!driveSync.hasStore()) return
+        val active = driveSync.store.accounts().active() ?: return
+        val hlc = driveSync.changeEngine.nextHlc(active.permissionId)
+        driveSync.workIdentity.confirmMerge(
+            permissionId = active.permissionId,
+            bookUrl = match.bookUrl,
+            keyA = match.localWorkKey,
+            keyB = match.candidateWorkKey,
+            hlc = hlc,
+        )
+        runCatching { driveSync.changeEngine.sync() }
+    }
+
+    /** Explicitly rejects an ambiguous title/author match and publishes a `workAlias` reject record. */
+    suspend fun rejectWorkMatch(match: DrivePendingWorkMatch) {
+        if (!driveSync.hasStore()) return
+        val active = driveSync.store.accounts().active() ?: return
+        val hlc = driveSync.changeEngine.nextHlc(active.permissionId)
+        driveSync.workIdentity.rejectMerge(
+            permissionId = active.permissionId,
+            bookUrl = match.bookUrl,
+            keyA = match.localWorkKey,
+            keyB = match.candidateWorkKey,
+            hlc = hlc,
+        )
+        runCatching { driveSync.changeEngine.sync() }
     }
 
     /**
@@ -512,29 +965,27 @@ internal class DriveAccountController(
     suspend fun handleAuthExpired(failedAccessToken: String): SilentTokenResult =
         acquireSilentAccessToken(staleTokenToClear = failedAccessToken)
 
-    /** Reads exact local library counts from `liseur.db` for the confirmation dialog. */
+    /**
+     * Counts what the initial Drive export will send, with the export's own rules:
+     * library books only (browse-only copies stay out), minus the untouched server
+     * previews a switch removes; notes and closed reading sessions recorded on this
+     * device for those books (imported and Drive-pulled sessions are never sent).
+     */
     internal suspend fun readLocalLibrarySummary(): LocalLibrarySummary {
         val bookDao = database.bookDao()
-        // Untouched previews of a connected server are deleted on activation, so they are not
-        // books Drive will carry.
-        val discarded = if (remoteAccount.current() != null) {
-            val preserved = bookDao.remoteNotDownloadedPreservedStubs().mapTo(HashSet()) { it.url }
-            bookDao.remoteNotDownloadedUrls().filterNotTo(HashSet()) { it in preserved }
+        val removedOnSwitch = if (remoteAccount.current() != null) {
+            bookDao.remoteNotDownloadedUrls().toSet() -
+                bookDao.remoteNotDownloadedPreservedStubs().mapTo(HashSet()) { it.url }
         } else {
             emptySet()
         }
-        val books = bookDao.allOnce().count {
-            (it.browseServerId == null || it.localUri != null) && it.url !in discarded
-        }
-        val notes = database.annotationDao().all().size
-        // Only sittings Drive will carry: an imported one stays local, and one that
-        // cannot say where in the book it happened is never uploaded
-        // (`ReadingSessionDao.awaitingUpload`).
-        val sessions = database.readingSessionDao().closedForBackup().count {
-            it.importedAt == null && it.startProgression != null && it.endProgression != null
-        }
+        val eligibleUrls = bookDao.allOnce()
+            .filter { it.browseServerId == null && it.url !in removedOnSwitch }
+            .mapTo(HashSet()) { it.url }
+        val notes = database.annotationDao().all().count { it.bookId in eligibleUrls }
+        val sessions = database.readingSessionDao().localSessionsForSync().count { it.bookUrl in eligibleUrls }
         return LocalLibrarySummary(
-            booksCount = books,
+            booksCount = eligibleUrls.size,
             notesCount = notes,
             readingSessionsCount = sessions,
             // Only unowned words: other accounts' vocabulary is not this library's to disclose.
@@ -617,6 +1068,7 @@ internal class DriveAccountController(
             pendingAccessToken = null
             ephemeral.value = EphemeralState()
             driveSync.notifyActivated()
+            presentInitialUploadSelection()
         } catch (e: CancellationException) {
             throw e
         } catch (e: MainServerConnectedException) {
@@ -644,6 +1096,7 @@ internal class DriveAccountController(
     }
 
     companion object {
+        private const val TAG = "DriveAuth"
         const val RECONNECT_REQUIRED_REASON = "Google Drive access needs to be reconnected"
         const val STALE_ACCOUNT_REASON = "Google Drive account changed during authorization"
         const val ACCOUNT_MISMATCH_REASON =

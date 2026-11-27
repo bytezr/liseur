@@ -46,6 +46,11 @@ data class DriveAccount(
     @ColumnInfo(name = "hlc_counter", defaultValue = "0") val hlcCounter: Int = 0,
     @ColumnInfo(name = "metered_transfers", defaultValue = "0") val meteredTransfers: Boolean = false,
     /**
+     * When the reader last confirmed the EPUB upload selection for this account.
+     * Books added before it are left to the picker rather than offered again.
+     */
+    @ColumnInfo(name = "upload_selection_at") val uploadSelectionAt: Long? = null,
+    /**
      * The state this account held before it was paused for a pending account
      * switch; non-null means a confirmation was left open.
      *
@@ -132,6 +137,7 @@ data class DriveOutbox(
     val state: String,
     @ColumnInfo(name = "file_id") val fileId: String? = null,
     @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "ack_metadata_json") val ackMetadataJson: String? = null,
 ) {
     companion object {
         const val STATE_BUILT = "BUILT"
@@ -163,6 +169,13 @@ data class DriveRecordState(
     @ColumnInfo(name = "res_refs_json", defaultValue = "'[]'") val resRefsJson: String = "[]",
     @ColumnInfo(name = "last_hlc") val lastHlc: String,
     @ColumnInfo(name = "body_json") val bodyJson: String? = null,
+    /**
+     * The version is retained but deliberately not materialized: its `workKey` has no local
+     * book yet (`docs/DRIVE_SYNC.md` §4). The row is the record's causal baseline and is never
+     * published by this device; materialization replays it as an incoming record once the
+     * catalog gives the work a book, and clears the flag.
+     */
+    @ColumnInfo(name = "held", defaultValue = "0") val held: Boolean = false,
 ) {
     companion object {
         const val OP_PUT = "put"
@@ -220,6 +233,13 @@ data class DriveConflict(
     @ColumnInfo(name = "remote_json") val remoteJson: String? = null,
     @ColumnInfo(name = "remote_device_id") val remoteDeviceId: String,
     @ColumnInfo(name = "remote_hlc") val remoteHlc: String,
+    /** Wire `op` of the remote record; null on rows opened before schema 4. */
+    @ColumnInfo(name = "remote_op") val remoteOp: String? = null,
+    @ColumnInfo(name = "remote_seq") val remoteSeq: Long? = null,
+    /** Remote `anc` as a JSON array, kept until a referenced resolution arrives. */
+    @ColumnInfo(name = "remote_anc_json") val remoteAncJson: String? = null,
+    /** Remote `resRefs` as a JSON array, kept until a referenced resolution arrives. */
+    @ColumnInfo(name = "remote_res_refs_json") val remoteResRefsJson: String? = null,
     /** One of [STATE_OPEN], [STATE_RESOLVING], [STATE_RESOLVED]. */
     val state: String,
     val choice: String? = null,
@@ -259,18 +279,43 @@ data class DriveUpload(
     val sha256: String,
     @ColumnInfo(name = "book_url") val bookUrl: String,
     @ColumnInfo(name = "size_bytes") val sizeBytes: Long,
-    /** One of [STATE_PENDING], [STATE_UPLOADING], [STATE_UPLOADED], [STATE_FAILED]. */
+    /**
+     * One of [STATE_PENDING], [STATE_UPLOADING], [STATE_UPLOADED], [STATE_FAILED], or one of the
+     * non-queue states below.
+     */
     val state: String,
     @ColumnInfo(name = "session_uri") val sessionUri: String? = null,
     @ColumnInfo(name = "bytes_sent", defaultValue = "0") val bytesSent: Long = 0L,
     @ColumnInfo(name = "file_id") val fileId: String? = null,
     @ColumnInfo(name = "selected_at") val selectedAt: Long,
     @ColumnInfo(name = "updated_at") val updatedAt: Long,
+    /**
+     * True while this row is the automatic offer's own work and the reader has not asked
+     * for the edition by hand since. A deleted edition cancels such a row; a hand-picked
+     * one outlives a deletion that was queued before the reader asked.
+     */
+    @ColumnInfo(name = "auto_selected", defaultValue = "0") val autoSelected: Boolean = false,
 ) {
     companion object {
         const val STATE_PENDING = "PENDING"
         const val STATE_UPLOADING = "UPLOADING"
         const val STATE_UPLOADED = "UPLOADED"
         const val STATE_FAILED = "FAILED"
+
+        /**
+         * Not a queue entry: the reader deselected this edition while its upload had a Drive
+         * session or had created [fileId]; whatever that upload left in Drive is still to be
+         * found (via [sessionUri]) and trashed.
+         */
+        const val STATE_CANCELLED = "CANCELLED"
+
+        /** A [STATE_CANCELLED] edition the reader selected again: cleanup first, then a fresh upload. */
+        const val STATE_REQUEUE = "REQUEUE"
+
+        /**
+         * Not a queue entry: the reader deleted this edition in Google Drive, so nothing may
+         * upload it again until they select it by hand.
+         */
+        const val STATE_SUPPRESSED = "SUPPRESSED"
     }
 }

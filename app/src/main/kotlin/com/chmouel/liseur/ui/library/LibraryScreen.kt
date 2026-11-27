@@ -120,6 +120,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -943,6 +944,10 @@ fun LibraryScreen(
                         openingSample = openingSample,
                         onConnectServer = onConnectServer,
                         onRestoreBackup = onRestoreBackup,
+                        librarySync = (LocalContext.current.applicationContext as? LiseurApplication)
+                            ?.container
+                            ?.librarySync
+                            ?: com.chmouel.liseur.sync.LibrarySyncBackend.None,
                         modifier = fillAboveBar,
                     )
 
@@ -1241,6 +1246,7 @@ fun LibraryScreen(
             serverDeleteNeedsReconnect = state.serverDeleteNeedsReconnect,
             canUploadToServer = state.canUploadToServer,
             uploading = book.url in state.uploading,
+            uploadHeld = book.url in state.uploadHeld,
             refusal = state.refusedUploads[book.url],
             onDownload = { onDownload(book); sheetBook = null },
             onCancelDownload = { onCancelDownload(book); sheetBook = null },
@@ -1556,6 +1562,7 @@ internal fun BookActionsSheet(
     serverDeleteNeedsReconnect: Boolean,
     canUploadToServer: Boolean,
     uploading: Boolean,
+    uploadHeld: Boolean = false,
     refusal: RefusedBytes?,
     onDismiss: () -> Unit,
     onDownload: () -> Unit,
@@ -1574,16 +1581,22 @@ internal fun BookActionsSheet(
 ) {
     val container = (LocalContext.current.applicationContext as LiseurApplication).container
     val translations by container.wholeBookRecords.collectAsStateWithLifecycle(initialValue = emptyList())
+    val externalOwned = container.librarySync.ownsBook(book)
+    // Removing the copy is only safe while the backend can still hand the file back.
+    val externalRedownloadable by produceState(false, book) {
+        value = externalOwned && container.librarySync.canDownloadAgain(book)
+    }
     val actionState = BookActionState(
         downloading = downloading,
-        downloadedCopy = book.downloadState == DownloadState.DOWNLOADED && book.remoteUuid != null,
-        onServer = book.remoteUuid != null,
+        downloadedCopy = book.downloadState == DownloadState.DOWNLOADED && (book.remoteUuid != null || externalOwned),
+        canRemoveCopy = book.downloadState == DownloadState.DOWNLOADED && (book.remoteUuid != null || externalRedownloadable),
+        onServer = book.remoteUuid != null || (externalOwned && book.downloadHref != null),
         inLibrary = book.openableUrl != null,
         finished = book.finished,
         canMarkUnread = canMarkUnread,
         hasTranslation = translations.any { it.bookUrl == book.url },
         // Uploading a local book keeps its local URL and file, so it remains a local shelf entry (#147)
-        canUpload = book.livesOnlyOnThisDevice() && canUploadToServer && !uploading,
+        canUpload = book.livesOnlyOnThisDevice() && canUploadToServer && !uploading && !uploadHeld,
         canDeleteFromServer = canDeleteFromServer,
         serverDeleteNeedsReconnect = serverDeleteNeedsReconnect,
         browsingServer = book.browseServerId != null,
@@ -1629,6 +1642,9 @@ internal fun BookActionsSheet(
                     sections = layout.manageSections,
                     onBack = { managing = false },
                     onAction = onAction,
+                    externalManageAction = {
+                        container.librarySync.BookManageAction(book = book, onDone = onDismiss)
+                    },
                 )
             } else {
                 InitialBookActionsContent(
@@ -1736,6 +1752,7 @@ private fun ManageBookSheetContent(
     sections: List<ManageBookSection>,
     onBack: () -> Unit,
     onAction: (BookAction) -> Unit,
+    externalManageAction: @Composable () -> Unit = {},
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onBack, modifier = Modifier.padding(end = 4.dp)) {
@@ -1774,6 +1791,7 @@ private fun ManageBookSheetContent(
             )
         }
     }
+    externalManageAction()
 }
 
 @Composable

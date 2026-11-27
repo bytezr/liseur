@@ -103,6 +103,7 @@ import com.chmouel.liseur.ui.widget.widgetInputs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -138,7 +139,18 @@ class AppContainer(
     val eInkDisplay: EInkDisplay by lazy { OnyxEInkDisplay.bind() }
 
     private val httpClient = DefaultHttpClient()
-    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * The app scope, for work that outlives the screen and whose result the
+     * caller reads back; [launchAppWide] answers only a [Job].
+     */
+    internal val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Hands work to the app scope, which outlives the screen that started it:
+     * a reader leaving the book must not cancel an upload it just accepted.
+     */
+    fun launchAppWide(block: suspend CoroutineScope.() -> Unit): Job = applicationScope.launch(block = block)
 
     val assetRetriever = permissionSafeAssetRetriever(context.contentResolver, httpClient)
 
@@ -494,7 +506,7 @@ class AppContainer(
             report = usageReporting::capture,
             onChanged = {
                 applicationScope.launch {
-                    if (remoteRouter.supportsVocabularySync()) requestFullSync()
+                    if (remoteRouter.supportsVocabularySync() || librarySync.isActive()) requestFullSync()
                 }
             },
         )
@@ -727,6 +739,9 @@ class AppContainer(
             mainServer = { database.remoteServerDao().get() },
             browseServer = { id -> database.remoteServerDao().get(id) },
             inTransaction = { work -> bookRemoval.together(work) },
+            externalDownload = { book -> librarySync.enqueueDownload(book) },
+            externalCancel = { book -> librarySync.cancelDownload(book) },
+            externalCanRemoveDownload = { book -> !librarySync.ownsBook(book) || librarySync.canDownloadAgain(book) },
         )
 
     val bookUploads = BookUploadRepository(context.applicationContext)
@@ -1047,6 +1062,7 @@ class AppContainer(
             context = context.applicationContext,
             database = database,
             remoteAccount = remoteAccount,
+            bookRemoval = bookRemoval,
             switchCoordinator = librarySyncSwitchCoordinator,
             beforeServerDisconnect = {
                 bookDownloads.cancelAll(com.chmouel.liseur.data.calibre.BulkStopReason.ACCOUNT_CHANGED)

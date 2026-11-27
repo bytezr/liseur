@@ -154,10 +154,13 @@
     <string name="hardcover_conflict_review_too_long">Cette critique Hardcover est trop longue pour être importée dans Liseur.</string>
     <string name="hardcover_conflict_stale">La valeur de Liseur a changé entre-temps. Vérifiez-la et choisissez à nouveau.</string>
     <string name="hardcover_review_public_note">Public. Publié aussi comme votre critique Hardcover.</string>
-    <string name="drive_sync_settings_summary">Synchronisez votre bibliothèque, vos notes et votre progression de lecture avec Google Drive</string>
-    <string name="drive_sync_intro">Gardez votre catalogue, vos notes, votre vocabulaire, vos séances de lecture et votre progression synchronisés entre vos appareils grâce aux données d\'application de Google Drive. Les fichiers EPUB sélectionnés sont stockés dans un dossier Liseur sur Drive.</string>
+    <string name="drive_sync_settings_summary">Synchronisez votre bibliothèque et votre progression de lecture avec Google Drive</string>
+    <string name="drive_welcome_connect_library_hint">Google Drive, Calibre, BookOrbit, OPDS et bien d\'autres.</string>
+    <string name="drive_sync_intro">Synchronisez votre catalogue et votre progression entre vos appareils grâce aux données d\'application de Google Drive. Les fichiers EPUB sélectionnés sont stockés dans un dossier Liseur sur Drive.</string>
     <string name="drive_sync_status_active">Active</string>
     <string name="drive_sync_status_paused">En pause</string>
+    <string name="drive_sync_status_syncing">Synchronisation</string>
+    <string name="drive_sync_status_error">Erreur</string>
     <string name="drive_sync_status_needs_reconnect">Reconnexion requise</string>
     <string name="drive_sync_account_summary">%1$s · %2$s</string>
     <string name="drive_sync_status_label">État</string>
@@ -169,6 +172,9 @@
     <string name="drive_sync_connect">Connecter Google Drive</string>
     <string name="drive_sync_reconnect">Reconnecter</string>
     <string name="drive_sync_disconnect">Déconnecter</string>
+    <string name="drive_sync_disconnect_title">Déconnecter Google Drive ?</string>
+    <string name="drive_sync_disconnect_body">La synchronisation sera mise en pause sur cet appareil. Vos livres locaux, notes et progression de lecture seront conservés.</string>
+    <string name="drive_sync_paused_detail">La synchronisation est en pause sur cet appareil. Reconnectez-vous pour reprendre la synchronisation de votre bibliothèque et de votre progression.</string>
     <string name="drive_sync_switch_account">Changer de compte</string>
     <string name="drive_sync_connecting">Connexion à Google Drive…</string>
     <string name="drive_sync_needs_reconnect_detail">L\'autorisation Google Drive a expiré ou a été révoquée. Reconnectez-vous pour reprendre la synchronisation.</string>
@@ -199,6 +205,7 @@
     </plurals>
     <plurals name="drive_sync_vocabulary_count">
         <item quantity="one">%d mot enregistré</item>
+        <item quantity="many">%d mots enregistrés</item>
         <item quantity="other">%d mots enregistrés</item>
     </plurals>
     <plurals name="drive_sync_pending_uploads_count">
@@ -209,4 +216,60 @@
         <item quantity="one">%d conflit non résolu</item>
         <item quantity="other">%d conflits non résolus</item>
     </plurals>
+    <string name="drive_sync_now">Synchroniser maintenant</string>
+    <string name="drive_sync_syncing">Synchronisation avec Google Drive…</string>
+    <string name="drive_sync_upload_epubs">Envoyer des fichiers EPUB</string>
+    <string name="drive_sync_upload_epubs_title">Envoyer des fichiers EPUB</string>
+    <string name="drive_sync_upload_epubs_intro">Choisissez les fichiers EPUB présents sur cet appareil à envoyer dans le dossier Liseur de Google Drive. Votre catalogue et votre progression sont déjà synchronisés.</string>
+    <string name="drive_sync_upload_epubs_empty">Aucun fichier EPUB disponible sur cet appareil.</string>
+    <string name="drive_sync_upload_epubs_select_all">Tout sélectionner</string>
+    <string name="drive_sync_upload_epubs_clear">Effacer</string>
+    <string name="drive_sync_upload_epubs_unmetered_only">Envoyer les fichiers EPUB uniquement en Wi-Fi</string>
+    <string name="drive_sync_upload_epubs_unmetered_summary">Attendre une connexion non facturée avant de transférer les fichiers EPUB.</string>
+    <string name="drive_sync_upload_epubs_confirm">Envoyer la sélection</string>
+    <string name="drive_sync_upload_epubs_status_uploaded">Envoyé</string>
+    <string name="drive_sync_upload_epubs_status_pending">En attente</string>
+    <string name="drive_sync_upload_epubs_status_uploading">Envoi en cours</string>
+    <string name="drive_sync_upload_epubs_status_failed">Échec</string>
+    <string name="drive_sync_upgrade_required">Mettez Liseur à jour pour lire les changements Google Drive plus récents de %1$s.</string>
+    <string name="drive_sync_match_section_title">Livres peut-être en double</string>
+    <string name="drive_sync_match_body">« %1$s » semble être le même livre que « %2$s » sur Google Drive. Les fusionner pour partager la progression ?</string>
+    <string name="drive_sync_match_merge">Fusionner les livres</string>
+    <string name="drive_sync_match_keep_separate">Garder séparés</string>
+    <plurals name="drive_sync_upload_epubs_selection_summary">
+        <item quantity="one">%1$d livre sélectionné · %2$s</item>
+        <item quantity="other">%1$d livres sélectionnés · %2$s</item>
+    </plurals>
+    <string name="drive_sync_account_summary_conflicts">%1$s · %2$s · %3$s</string>
+    <string name="drive_sync_resolve_conflicts">Résoudre les conflits</string>
+    <string name="drive_sync_conflicts_dialog_title">Résoudre les conflits de synchronisation</string>
+    <string name="drive_sync_conflicts_dialog_intro">Choisissez la version à conserver. Votre choix sera synchronisé sur vos autres appareils.</string>
+    <string name="drive_sync_conflicts_dialog_close">Fermer</string>
+    <string name="drive_sync_conflict_local_label">Sur cet appareil</string>
+    <string name="drive_sync_conflict_remote_label">Sur l\'autre appareil</string>
+    <string name="drive_sync_conflict_deleted_value">Supprimé</string>
+    <string name="drive_sync_conflict_keep_mine">Garder la mienne</string>
+    <string name="drive_sync_conflict_keep_other">Garder l\'autre</string>
+    <string name="drive_sync_conflict_keep_edited_note">Garder la note modifiée</string>
+    <string name="drive_sync_conflict_delete_note">Supprimer la note</string>
+    <string name="drive_sync_conflict_keep_edited">Garder la modification</string>
+    <string name="drive_sync_conflict_delete_value">Supprimer</string>
+    <string name="drive_sync_conflict_series_keep_mine">Garder l\'ordre de cet appareil</string>
+    <string name="drive_sync_conflict_series_keep_other">Garder l\'ordre de l\'autre appareil</string>
+    <string name="drive_sync_conflict_domain_annotation">Annotation</string>
+    <string name="drive_sync_conflict_domain_evaluation">Note et critique</string>
+    <string name="drive_sync_conflict_domain_metadata">Détails du livre</string>
+    <string name="drive_sync_conflict_domain_series">Ordre de la série</string>
+    <string name="drive_sync_conflict_field_rating">Note</string>
+    <string name="drive_sync_conflict_field_review">Critique</string>
+    <string name="drive_sync_conflict_field_title">Titre</string>
+    <string name="drive_sync_conflict_field_author">Auteur</string>
+    <string name="drive_sync_conflict_field_description">Description</string>
+    <string name="drive_sync_conflict_field_cover">Couverture personnalisée</string>
+    <string name="drive_sync_delete_from_library">Supprimer de la bibliothèque synchronisée</string>
+    <string name="drive_sync_delete_from_library_title">Supprimer de la bibliothèque synchronisée ?</string>
+    <string name="drive_sync_delete_from_library_warning_remote">« %1$s » sera retiré de votre bibliothèque synchronisée sur Google Drive et son EPUB envoyé sera placé dans la corbeille de Google Drive. Vos notes et surlignages seront conservés.</string>
+    <string name="drive_sync_delete_from_library_warning_local">« %1$s » sera retiré de votre bibliothèque synchronisée sur Google Drive et son EPUB envoyé sera placé dans la corbeille de Google Drive. Le fichier local sur cet appareil ne sera pas modifié.</string>
+    <string name="drive_sync_delete_from_library_confirm">Supprimer de la bibliothèque synchronisée</string>
+    <string name="drive_sync_delete_from_library_failed">Impossible de supprimer de la bibliothèque synchronisée. Réessayez.</string>
 </resources>

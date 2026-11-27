@@ -74,6 +74,14 @@ class BookActionLayoutTest {
     }
 
     @Test
+    fun `upload action is hidden when the book is already queued or held`() {
+        val state = localOnly.copy(canUpload = false)
+        val layout = bookActionLayout(state)
+        val bookSection = layout.sections.first { it.id == BookActionSectionId.Book }
+        assertFalse(BookAction.UploadToServer in bookSection.actions)
+    }
+
+    @Test
     fun `a downloading book offers cancel as primary action`() {
         val state = downloadedFromServer.copy(downloading = true, downloadedCopy = false)
         val layout = bookActionLayout(state)
@@ -90,6 +98,15 @@ class BookActionLayoutTest {
         assertEquals(BookAction.CancelDownload, layout.primaryAction)
         assertFalse(BookAction.RemoveCopy in allManageActions(state))
         assertFalse(BookAction.Download in allActions(state))
+    }
+
+    @Test
+    fun `a downloaded copy that cannot be redownloaded offers neither download nor remove copy`() {
+        val state = downloadedFromServer.copy(canRemoveCopy = false)
+        val layout = bookActionLayout(state)
+        assertNull(layout.primaryAction)
+        assertFalse(BookAction.Download in allActions(state))
+        assertFalse(BookAction.RemoveCopy in allManageActions(state))
     }
 
     @Test
